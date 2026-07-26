@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+
+# Voicebanks are local assets and may be very large. Keep the directory marker.
+voicebank/*
+!voicebank/.gitkeep
+

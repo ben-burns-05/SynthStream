@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools==83.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthstream"
+version = "0.1.0"
+description = "Live human speech to UTAU/VOCALOID-style voicebank conversion"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "numpy==2.3.5",
+    "scipy==1.18.0",
+    "torch==2.13.0",
+    "torchaudio==2.11.0",
+    "sounddevice==0.5.5",
+    "soundfile==0.14.0",
+    "PySide6==6.11.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy==1.20.2",
+    "pytest==8.4.2",
+    "pytest-cov==6.3.0",
+    "pytest-qt==4.5.0",
+    "ruff==0.16.2",
+]
+
+[project.scripts]
+synthstream = "synthstream.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+synthstream = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers --cov=synthstream --cov-report=term-missing"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["synthstream"]
