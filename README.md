@@ -21,3 +21,15 @@ mypy
 
 The immutable initial requirements are in `docs/initial_spec.md`. Implementation decisions and evolving requirements belong in `docs/spec.md`.
 
+## Loading a voicebank
+
+Milestone 1 provides a recursive UTAU `oto.ini` loader:
+
+```python
+from synthstream.voicebank import load_voicebank
+
+bank = load_voicebank("voicebank/my-bank")
+print(len(bank.units))
+```
+
+Parsed metadata is cached inside the selected bank's ignored `.synthstream-cache/` directory. The cache is automatically invalidated when an `oto.ini` file or referenced WAV changes.

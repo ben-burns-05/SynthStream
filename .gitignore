@@ -12,4 +12,5 @@ dist/
 # Voicebanks are local assets and may be very large. Keep the directory marker.
 voicebank/*
 !voicebank/.gitkeep
+.synthstream-cache/
 
