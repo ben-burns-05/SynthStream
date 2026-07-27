@@ -33,3 +33,21 @@ print(len(bank.units))
 ```
 
 Parsed metadata is cached inside the selected bank's ignored `.synthstream-cache/` directory. The cache is automatically invalidated when an `oto.ini` file or referenced WAV changes.
+
+## Rendering a voicebank unit
+
+Milestone 2 can render a loaded unit at an independently selected duration and pitch, then route the result through a file or device sink:
+
+```python
+from synthstream.audio import WavFileSink
+from synthstream.rendering import VoicebankRenderer
+from synthstream.voicebank import load_voicebank
+
+unit = load_voicebank("voicebank/my-bank").units[0]
+result = VoicebankRenderer().render_unit(
+    unit,
+    duration_seconds=0.75,
+    pitch_ratio=1.25,
+)
+result.send_to(WavFileSink("rendered.wav"))
+```
