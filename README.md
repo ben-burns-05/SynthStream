@@ -88,3 +88,24 @@ print(features.f0_hz, features.voiced)
 ```
 
 The recognition matrix contains normalized log-mel spectra, spectral deltas, energy and delta energy, spectral flux, flatness, and periodicity. F0 and RMS energy remain available as separate synthesis/prosody signals.
+
+## Voicebank section matching
+
+Milestone 5 precomputes the same recognition features for every loaded voicebank section and uniformly warps section trajectories when scoring human intervals:
+
+```python
+from synthstream.analysis import FeatureExtractor
+from synthstream.matching import SectionFeatureIndex, SectionMatcher
+from synthstream.voicebank import load_voicebank
+
+extractor = FeatureExtractor()
+bank = load_voicebank("voicebank/my-bank")
+index = SectionFeatureIndex.build(bank, extractor)
+matcher = SectionMatcher(index)
+
+human = extractor.analyze(human_audio)
+ranked = matcher.match_interval(human, start_frame=0, end_frame=human.frame_count)
+print(ranked[0].template.alias, ranked[0].total_cost)
+```
+
+Each result retains separate spectral, delta, periodicity, flatness, flux, energy, and duration costs. The feature index caches trajectories for unchanged banks and supports vectorized onset shortlisting while keeping the complete vocabulary available.
