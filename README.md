@@ -51,3 +51,22 @@ result = VoicebankRenderer().render_unit(
 )
 result.send_to(WavFileSink("rendered.wav"))
 ```
+
+## Realtime audio transport
+
+Milestone 3 keeps the physical audio callback limited to bounded sample movement. Processing workers read microphone samples and enqueue synthesized output independently:
+
+```python
+from synthstream.audio import RealtimeAudioStream, SoundDeviceDuplexBackend
+
+backend = SoundDeviceDuplexBackend(input_device=None, output_device=None)
+stream = RealtimeAudioStream(backend, sample_rate=16_000, block_size=320)
+stream.start()
+
+human_audio = stream.read_input(320)
+stream.write_output(synthesized_audio)
+
+stream.stop()
+```
+
+`FakeDuplexAudioBackend` drives the same production transport in deterministic callback-sized blocks for automated tests.
