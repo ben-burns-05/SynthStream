@@ -70,3 +70,21 @@ stream.stop()
 ```
 
 `FakeDuplexAudioBackend` drives the same production transport in deterministic callback-sized blocks for automated tests.
+
+## Human audio analysis
+
+Milestone 4 extracts configurable frame features for matching while keeping absolute F0 separate for later prosody transfer:
+
+```python
+from synthstream.analysis import AnalysisConfig, FeatureExtractor
+
+extractor = FeatureExtractor(
+    AnalysisConfig(sample_rate=16_000, window_ms=25, hop_ms=10, mel_bands=40)
+)
+features = extractor.analyze(human_audio)
+
+print(features.recognition_features.shape)
+print(features.f0_hz, features.voiced)
+```
+
+The recognition matrix contains normalized log-mel spectra, spectral deltas, energy and delta energy, spectral flux, flatness, and periodicity. F0 and RMS energy remain available as separate synthesis/prosody signals.
