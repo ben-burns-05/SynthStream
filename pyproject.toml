@@ -30,6 +30,7 @@ dev = [
 
 [project.scripts]
 synthstream = "synthstream.app:main"
+synthstream-recognize = "synthstream.offline.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

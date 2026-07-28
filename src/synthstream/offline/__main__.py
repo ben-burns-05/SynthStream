@@ -1,0 +1,30 @@
+"""Command-line entry point for offline timeline recognition."""
+
+import argparse
+from collections.abc import Sequence
+
+from synthstream.offline.recognizer import recognize_wav
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Recognize a human WAV with a voicebank")
+    parser.add_argument("human_wav", help="human speech WAV to analyze")
+    parser.add_argument("voicebank", help="UTAU voicebank directory")
+    parser.add_argument("--output", "-o", required=True, help="timeline JSON output path")
+    arguments = parser.parse_args(argv)
+
+    timeline = recognize_wav(
+        arguments.human_wav,
+        arguments.voicebank,
+        output_json=arguments.output,
+    )
+    print(
+        f"Recognized {len(timeline.segments)} segments "
+        f"from {timeline.input_duration_seconds:.3f}s of audio"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

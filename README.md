@@ -125,3 +125,13 @@ for segment in result.best_path.segments:
 ```
 
 The result retains alternative final paths, per-segment stretch and cost details, and beam diagnostics. Within-unit section order is enforced, switching units is penalized, long silence is supported, and multiple early interpretations can remain alive until later sections resolve them.
+
+## Offline WAV recognition
+
+Milestone 7 runs a prerecorded human WAV through the same production analysis, matching, and decoding components and exports a machine-readable timeline:
+
+```powershell
+synthstream-recognize human.wav voicebank/my-bank --output timeline.json
+```
+
+The timeline records each selected voicebank unit and section, start/end time, duration, stretch ratio, silence state, component costs, and decoder diagnostics. Input WAV files may be mono or multichannel and are resampled to the configured analysis rate when necessary.
