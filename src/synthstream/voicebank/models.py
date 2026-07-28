@@ -45,15 +45,24 @@ class VoicebankUnit:
 
 
 @dataclass(frozen=True, slots=True)
+class VoicebankIssue:
+    """A skipped voicebank entry that remains visible to callers."""
+
+    oto_path: Path
+    line_number: int
+    message: str
+
+
+@dataclass(frozen=True, slots=True)
 class Voicebank:
     """A complete loaded voicebank."""
 
     root: Path
     units: tuple[VoicebankUnit, ...]
     fingerprint: str
+    issues: tuple[VoicebankIssue, ...] = ()
     cache_hit: bool = False
 
     def units_for_alias(self, alias: str) -> tuple[VoicebankUnit, ...]:
         """Return every recording matching an alias, preserving bank order."""
         return tuple(unit for unit in self.units if unit.alias == alias)
-

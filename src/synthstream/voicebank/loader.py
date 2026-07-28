@@ -12,9 +12,14 @@ from typing import Any
 
 import soundfile as sf  # type: ignore[import-untyped]
 
-from synthstream.voicebank.models import Voicebank, VoicebankSection, VoicebankUnit
+from synthstream.voicebank.models import (
+    Voicebank,
+    VoicebankIssue,
+    VoicebankSection,
+    VoicebankUnit,
+)
 
-_CACHE_SCHEMA = 1
+_CACHE_SCHEMA = 2
 _CACHE_DIRECTORY = ".synthstream-cache"
 _CACHE_FILENAME = "voicebank-v1.json"
 
@@ -23,7 +28,9 @@ class VoicebankLoadError(ValueError):
     """Raised when a voicebank cannot be represented safely."""
 
 
-def load_voicebank(root: str | Path, *, use_cache: bool = True) -> Voicebank:
+def load_voicebank(
+    root: str | Path, *, use_cache: bool = True, strict: bool = False
+) -> Voicebank:
     """Load every entry in every recursively discovered ``oto.ini`` file."""
     bank_root = Path(root).expanduser().resolve()
     if not bank_root.is_dir():
@@ -35,15 +42,25 @@ def load_voicebank(root: str | Path, *, use_cache: bool = True) -> Voicebank:
 
     cache_path = bank_root / _CACHE_DIRECTORY / _CACHE_FILENAME
     if use_cache:
-        cached = _load_cache_if_current(bank_root, oto_paths, cache_path)
+        cached = _load_cache_if_current(bank_root, oto_paths, cache_path, strict=strict)
         if cached is not None:
             return cached
 
     units: list[VoicebankUnit] = []
+    issues: list[VoicebankIssue] = []
     source_paths: set[Path] = set(oto_paths)
     for oto_path in oto_paths:
         for line_number, line in _meaningful_lines(oto_path):
-            unit = _parse_unit(bank_root, oto_path, line_number, line)
+            referenced_path = _referenced_wav_path(bank_root, oto_path, line)
+            if referenced_path is not None:
+                source_paths.add(referenced_path)
+            try:
+                unit = _parse_unit(bank_root, oto_path, line_number, line)
+            except VoicebankLoadError as error:
+                if strict:
+                    raise
+                issues.append(VoicebankIssue(oto_path, line_number, str(error)))
+                continue
             units.append(unit)
             source_paths.add(unit.wav_path)
 
@@ -51,7 +68,7 @@ def load_voicebank(root: str | Path, *, use_cache: bool = True) -> Voicebank:
         raise VoicebankLoadError(f"No usable oto.ini entries found below: {bank_root}")
 
     fingerprint, source_records = _fingerprint(bank_root, source_paths)
-    bank = Voicebank(bank_root, tuple(units), fingerprint)
+    bank = Voicebank(bank_root, tuple(units), fingerprint, tuple(issues))
     if use_cache:
         _write_cache(cache_path, bank, source_records)
     return bank
@@ -138,7 +155,21 @@ def _parse_unit(root: Path, oto_path: Path, line_number: int, line: str) -> Voic
     )
 
 
+def _referenced_wav_path(root: Path, oto_path: Path, line: str) -> Path | None:
+    if "=" not in line:
+        return None
+    wav_name = line.split("=", 1)[0].strip().replace("\\", os.sep).replace("/", os.sep)
+    path = (oto_path.parent / wav_name).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return None
+    return path
+
+
 def _parse_finite_float(value: str, location: str) -> float:
+    if not value:
+        return 0.0
     try:
         number = float(value)
     except ValueError as error:
@@ -183,23 +214,25 @@ def _make_sections(
     return sections
 
 
-def _fingerprint(root: Path, paths: Iterable[Path]) -> tuple[str, list[dict[str, int | str]]]:
-    records: list[dict[str, int | str]] = []
+def _fingerprint(
+    root: Path, paths: Iterable[Path]
+) -> tuple[str, list[dict[str, bool | int | str]]]:
+    records: list[dict[str, bool | int | str]] = []
     for path in sorted(paths, key=_relative_sort_key(root)):
-        stat = path.stat()
-        records.append(
-            {
-                "path": path.relative_to(root).as_posix(),
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-            }
-        )
+        record: dict[str, bool | int | str] = {
+            "path": path.relative_to(root).as_posix(),
+            "exists": path.is_file(),
+        }
+        if path.is_file():
+            stat = path.stat()
+            record.update({"size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+        records.append(record)
     encoded = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest(), records
 
 
 def _load_cache_if_current(
-    root: Path, oto_paths: tuple[Path, ...], cache_path: Path
+    root: Path, oto_paths: tuple[Path, ...], cache_path: Path, *, strict: bool
 ) -> Voicebank | None:
     try:
         payload = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -216,18 +249,38 @@ def _load_cache_if_current(
         fingerprint, current_records = _fingerprint(root, source_paths)
         if current_records != records or fingerprint != payload["fingerprint"]:
             return None
+        issues = tuple(
+            VoicebankIssue(
+                root / item["oto_path"], item["line_number"], item["message"]
+            )
+            for item in payload.get("issues", [])
+        )
+        if strict and issues:
+            return None
         units = tuple(_unit_from_dict(root, item) for item in payload["units"])
-        return Voicebank(root, units, fingerprint, cache_hit=True)
+        return Voicebank(root, units, fingerprint, issues, cache_hit=True)
     except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
         return None
 
 
-def _write_cache(cache_path: Path, bank: Voicebank, records: list[dict[str, int | str]]) -> None:
+def _write_cache(
+    cache_path: Path,
+    bank: Voicebank,
+    records: list[dict[str, bool | int | str]],
+) -> None:
     payload = {
         "schema": _CACHE_SCHEMA,
         "fingerprint": bank.fingerprint,
         "sources": records,
         "units": [_unit_to_dict(bank.root, unit) for unit in bank.units],
+        "issues": [
+            {
+                "oto_path": issue.oto_path.relative_to(bank.root).as_posix(),
+                "line_number": issue.line_number,
+                "message": issue.message,
+            }
+            for issue in bank.issues
+        ],
     }
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = cache_path.with_suffix(".tmp")

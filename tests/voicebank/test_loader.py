@@ -82,6 +82,19 @@ def test_cache_invalidates_when_metadata_changes(tmp_path: Path) -> None:
     assert reloaded.units[0].alias == "new alias"
 
 
+def test_blank_utau_fields_use_zero_defaults_and_filename_alias(tmp_path: Path) -> None:
+    _write_wav(tmp_path / "unconfigured.wav")
+    _write_oto(tmp_path / "oto.ini", "unconfigured.wav=,,,,,\n")
+
+    bank = load_voicebank(tmp_path, use_cache=False)
+
+    assert len(bank.units) == 1
+    assert bank.units[0].alias == "unconfigured"
+    assert bank.units[0].offset_ms == 0
+    assert bank.units[0].sections[0].kind == "sustain"
+    assert bank.units[0].duration_seconds == pytest.approx(0.5)
+
+
 @pytest.mark.parametrize(
     ("oto_entry", "message"),
     [
@@ -96,9 +109,32 @@ def test_reports_invalid_entries(tmp_path: Path, oto_entry: str, message: str) -
     _write_oto(tmp_path / "oto.ini", f"{oto_entry}\n")
 
     with pytest.raises(VoicebankLoadError, match=message):
-        load_voicebank(tmp_path, use_cache=False)
+        load_voicebank(tmp_path, use_cache=False, strict=True)
 
 
 def test_rejects_directory_without_metadata(tmp_path: Path) -> None:
     with pytest.raises(VoicebankLoadError, match="No oto.ini"):
         load_voicebank(tmp_path)
+
+
+def test_tolerant_load_skips_broken_reference_and_preserves_diagnostic(
+    tmp_path: Path,
+) -> None:
+    _write_wav(tmp_path / "valid.wav")
+    _write_oto(
+        tmp_path / "oto.ini",
+        "valid.wav=valid,0,100,0,30,10\nmissing.wav=missing,0,100,0,30,10\n",
+    )
+
+    first = load_voicebank(tmp_path)
+    cached = load_voicebank(tmp_path)
+
+    assert [unit.alias for unit in first.units] == ["valid"]
+    assert len(first.issues) == 1
+    assert first.issues[0].line_number == 2
+    assert "does not exist" in first.issues[0].message
+    assert cached.cache_hit
+    assert cached.issues == first.issues
+
+    with pytest.raises(VoicebankLoadError, match="does not exist"):
+        load_voicebank(tmp_path, strict=True)
