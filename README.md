@@ -109,3 +109,19 @@ print(ranked[0].template.alias, ranked[0].total_cost)
 ```
 
 Each result retains separate spectral, delta, periodicity, flatness, flux, energy, and duration costs. The feature index caches trajectories for unchanged banks and supports vectorized onset shortlisting while keeping the complete vocabulary available.
+
+## Segmental decoding
+
+Milestone 6 jointly searches section identity and duration through the voicebank graph, with silence represented inside the same beam:
+
+```python
+from synthstream.decoding import SegmentalBeamDecoder
+
+decoder = SegmentalBeamDecoder(matcher)
+result = decoder.decode(human)
+
+for segment in result.best_path.segments:
+    print(segment.alias, segment.section_kind, segment.start_frame, segment.end_frame)
+```
+
+The result retains alternative final paths, per-segment stretch and cost details, and beam diagnostics. Within-unit section order is enforced, switching units is penalized, long silence is supported, and multiple early interpretations can remain alive until later sections resolve them.

@@ -79,17 +79,24 @@ class SectionMatcher:
         """Return a component score, or ``None`` outside duration constraints."""
         if not 0 <= start_frame < end_frame <= human.frame_count:
             raise ValueError("candidate frame interval is invalid")
-        return self._score_candidate_features(
+        return self.score_candidate_features(
             template, human.recognition_features, start_frame, end_frame
         )
 
-    def _score_candidate_features(
+    def score_candidate_features(
         self,
         template: SectionTemplate,
         human_features: FloatArray,
         start_frame: int,
         end_frame: int,
     ) -> SectionMatchScore | None:
+        """Score against an already combined matrix for high-volume decoder use."""
+        if (
+            human_features.ndim != 2
+            or human_features.shape[1] != template.features.shape[1]
+            or not 0 <= start_frame < end_frame <= len(human_features)
+        ):
+            raise ValueError("candidate feature matrix or frame interval is invalid")
         duration_frames = end_frame - start_frame
         stretch_ratio = duration_frames / template.nominal_frame_count
         if not template.minimum_stretch <= stretch_ratio <= template.maximum_stretch:
@@ -136,7 +143,7 @@ class SectionMatcher:
             score
             for template in candidates
             if (
-                score := self._score_candidate_features(
+                score := self.score_candidate_features(
                     template, human_features, start_frame, end_frame
                 )
             )
