@@ -9,6 +9,7 @@ import numpy as np
 import soundfile as sf  # type: ignore[import-untyped]
 import torch
 import torchaudio.functional as audio_functional  # type: ignore[import-untyped]
+from scipy.signal import resample  # type: ignore[import-untyped]
 
 from synthstream.audio.output import AudioSamples, AudioSink
 from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
@@ -120,12 +121,12 @@ def _validate_transform(duration_seconds: float, pitch_ratio: float) -> None:
 
 
 def _pitch_shift(samples: AudioSamples, sample_rate: int, pitch_ratio: float) -> AudioSamples:
+    del sample_rate
     if math.isclose(pitch_ratio, 1.0):
         return samples.copy()
-    waveform = torch.from_numpy(samples).unsqueeze(0)
-    semitones = 12 * math.log2(pitch_ratio)
-    shifted: torch.Tensor = audio_functional.pitch_shift(waveform, sample_rate, semitones)
-    return np.asarray(shifted.squeeze(0).numpy(), dtype=np.float32)
+    stretched_length = max(1, round(len(samples) * pitch_ratio))
+    stretched = _time_stretch(samples, stretched_length)
+    return np.asarray(resample(stretched, len(samples)), dtype=np.float32)
 
 
 def _time_stretch(samples: AudioSamples, target_samples: int) -> AudioSamples:
