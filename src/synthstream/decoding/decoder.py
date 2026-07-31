@@ -300,10 +300,16 @@ class SegmentalBeamDecoder:
             (energy_db - self.config.silence_energy_threshold_db)
             / self.config.silence_energy_scale_db,
         )
+        # Silence is a frame-wise state. Accumulate its evidence so that
+        # swallowing additional voiced frames becomes progressively more
+        # expensive; averaging here made an arbitrarily long silence compete
+        # as a single cheap segment against several voicebank sections.
         acoustic_cost = float(
-            np.mean(np.square(excess))
-            + self.config.silence_periodicity_weight
-            * np.mean(np.square(human.periodicity[start_frame:end_frame]))
+            np.sum(
+                np.square(excess)
+                + self.config.silence_periodicity_weight
+                * np.square(human.periodicity[start_frame:end_frame])
+            )
         )
         segment_cost = acoustic_cost + transition_cost
         segment = DecodedSegment(
