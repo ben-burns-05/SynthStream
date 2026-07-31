@@ -20,11 +20,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     print(
         f"Recognized {len(timeline.segments)} segments "
-        f"from {timeline.input_duration_seconds:.3f}s of audio"
+        f"from {timeline.input_duration_seconds:.3f}s of audio "
+        f"with {timeline.recognition_mode}"
     )
+    if timeline.transcript:
+        print(f"Transcript: {timeline.transcript}")
+    if timeline.unmapped_words:
+        print(f"Unmapped words: {', '.join(timeline.unmapped_words)}")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

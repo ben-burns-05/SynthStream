@@ -98,9 +98,10 @@ class EnglishCTCRecognizer:
         if not words:
             return ()
         expanded = list(words)
-        expanded[0] = RecognizedWord(
-            expanded[0].text, 0.0, expanded[0].end_seconds, expanded[0].confidence
-        )
+        if expanded[0].start_seconds <= 0.15:
+            expanded[0] = RecognizedWord(
+                expanded[0].text, 0.0, expanded[0].end_seconds, expanded[0].confidence
+            )
         for index in range(len(expanded) - 1):
             left, right = expanded[index], expanded[index + 1]
             gap = right.start_seconds - left.end_seconds
@@ -150,7 +151,16 @@ class AikoEnglishAliasMap:
     @classmethod
     def supports(cls, bank: Voicebank) -> bool:
         aliases = {unit.alias for unit in bank.units}
-        return {"-I", "h@", "@d", "dh@", "@t"}.issubset(aliases)
+        if not {"-I", "h@", "@d", "dh@", "@t"}.issubset(aliases):
+            return False
+        for readme in bank.root.rglob("readme.txt"):
+            try:
+                contents = readme.read_text(encoding="utf-8", errors="ignore").lower()
+            except OSError:
+                continue
+            if "kikyuune aiko" in contents and "phonemes guide" in contents:
+                return True
+        return False
 
     def plan(self, words: tuple[RecognizedWord, ...]) -> PhoneticRecognition:
         aliases: list[PlannedAlias] = []
@@ -197,16 +207,29 @@ class AikoEnglishAliasMap:
             vowel = usable[vowel_index]
             previous_vowel = vowels[vowel_number - 1] if vowel_number else -1
             next_vowel = vowels[vowel_number + 1] if vowel_number + 1 < len(vowels) else len(phones)
-            onset = "".join(usable[previous_vowel + 1 : vowel_index])
-            coda = "".join(usable[vowel_index + 1 : next_vowel])
+            onset_symbols = usable[previous_vowel + 1 : vowel_index]
+            coda_symbols = usable[vowel_index + 1 : next_vowel]
 
-            onset_candidates = ([onset + vowel] if onset else ["-" + vowel, vowel])
+            if onset_symbols:
+                onset_candidates = ["".join(onset_symbols) + vowel]
+                if onset_symbols[-1] == "y" and len(onset_symbols) > 1:
+                    onset_candidates.append("".join(onset_symbols[:-1]) + "yo")
+            elif vowel_number:
+                onset_candidates = [usable[previous_vowel] + vowel]
+            else:
+                onset_candidates = ["-" + vowel, vowel]
             onset_alias = self._first_existing(onset_candidates)
             if onset_alias:
                 planned.append((onset_alias, phones[previous_vowel + 1 : vowel_index + 1]))
-            coda_alias = self._first_existing([vowel + coda]) if coda else None
-            if coda_alias:
-                planned.append((coda_alias, phones[vowel_index : next_vowel]))
+            if coda_symbols:
+                contextual = (vowel, *coda_symbols)
+                for pair_index, (left, right) in enumerate(
+                    zip(contextual, contextual[1:], strict=False)
+                ):
+                    coda_alias = self._first_existing([left + right])
+                    if coda_alias:
+                        start = vowel_index + pair_index
+                        planned.append((coda_alias, phones[start : start + 2]))
         return tuple(planned)
 
     def _symbol(self, phone: str) -> str | None:

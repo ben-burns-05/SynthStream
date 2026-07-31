@@ -128,10 +128,25 @@ The result retains alternative final paths, per-segment stretch and cost details
 
 ## Offline WAV recognition
 
-Milestone 7 runs a prerecorded human WAV through the same production analysis, matching, and decoding components and exports a machine-readable timeline:
+Milestone 7 exports a machine-readable real-voicebank timeline from prerecorded human speech:
 
 ```powershell
 synthstream-recognize human.wav voicebank/my-bank --output timeline.json
 ```
 
-The timeline records each selected voicebank unit and section, start/end time, duration, stretch ratio, silence state, component costs, and decoder diagnostics. Input WAV files may be mono or multichannel and are resampled to the configured analysis rate when necessary.
+For Kikyuune Aiko RockLoud CVVC EN, the production path uses wav2vec2 CTC English
+recognition, CMUdict pronunciations, and an explicit mapping into the phoneme notation
+documented by that bank. It emits only aliases that exist in the loaded bank, expands each
+alias into its real OTO-derived sections, reports words that could not be mapped, and retains
+silence in the timeline. The first use downloads the approximately 360 MB torchaudio model
+weights into PyTorch's model cache.
+
+For banks without a verified phoneme map, the earlier acoustic segmental decoder remains a
+fallback and the JSON field `recognition_mode` says `acoustic-segmental`. Its output must not be
+treated as semantically validated. A supported Aiko result instead reports
+`wav2vec2-ctc-cmudict-aiko-cvvc`, includes the recognized `transcript`, and lists any
+`unmapped_words`.
+
+The timeline records each selected voicebank unit and section, start/end time, duration,
+stretch ratio, silence state, costs, and diagnostics. Input WAV files may be mono or
+multichannel and are resampled to the configured analysis rate when necessary.
