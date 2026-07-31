@@ -14,12 +14,14 @@ from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
 from synthstream.analysis import AnalysisConfig, FeatureExtractor
 from synthstream.decoding import (
+    DecodedPath,
     DecodedSegment,
     DecoderConfig,
     DecodeResult,
     SegmentalBeamDecoder,
 )
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
+from synthstream.offline.phonetic import AikoEnglishAliasMap, recognize_aiko_english
 from synthstream.voicebank import Voicebank, load_voicebank
 
 
@@ -54,6 +56,9 @@ class RecognitionTimeline:
     path_cost: float
     segments: tuple[TimelineSegment, ...]
     decode_result: DecodeResult
+    recognition_mode: str = "acoustic-segmental"
+    transcript: str | None = None
+    unmapped_words: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-facing timeline representation."""
@@ -66,6 +71,9 @@ class RecognitionTimeline:
             "hop_seconds": self.hop_seconds,
             "input_duration_seconds": self.input_duration_seconds,
             "path_cost": self.path_cost,
+            "recognition_mode": self.recognition_mode,
+            "transcript": self.transcript,
+            "unmapped_words": list(self.unmapped_words),
             "segments": [asdict(segment) for segment in self.segments],
             "diagnostics": {
                 "frames_processed": self.decode_result.frames_processed,
@@ -100,11 +108,16 @@ class OfflineRecognizer:
     ) -> None:
         self.bank = bank
         self.extractor = FeatureExtractor(analysis_config)
-        self.feature_index = SectionFeatureIndex.build(
-            bank, self.extractor, use_cache=use_feature_cache
-        )
-        self.matcher = SectionMatcher(self.feature_index, match_weights)
-        self.decoder = SegmentalBeamDecoder(self.matcher, decoder_config)
+        if AikoEnglishAliasMap.supports(bank):
+            self.feature_index = None
+            self.matcher = None
+            self.decoder = None
+        else:
+            self.feature_index = SectionFeatureIndex.build(
+                bank, self.extractor, use_cache=use_feature_cache
+            )
+            self.matcher = SectionMatcher(self.feature_index, match_weights)
+            self.decoder = SegmentalBeamDecoder(self.matcher, decoder_config)
 
     @classmethod
     def from_voicebank(
@@ -148,7 +161,14 @@ class OfflineRecognizer:
                 resample_poly(mono, target_rate // divisor, source_rate // divisor),
                 dtype=np.float32,
             )
+        if AikoEnglishAliasMap.supports(self.bank):
+            return self._recognize_aiko_english(
+                source_path, mono, target_rate, input_duration
+            )
+
         features = self.extractor.analyze(mono)
+        if self.decoder is None:
+            raise RuntimeError("acoustic decoder is unavailable for this mapped voicebank")
         decode_result = self.decoder.decode(features)
         hop_seconds = self.extractor.config.hop_samples / target_rate
         timeline_segments = tuple(
@@ -169,6 +189,88 @@ class OfflineRecognizer:
             decode_result.best_path.total_cost,
             timeline_segments,
             decode_result,
+        )
+
+    def _recognize_aiko_english(
+        self,
+        source_path: Path,
+        mono: np.ndarray,
+        sample_rate: int,
+        input_duration: float,
+    ) -> RecognitionTimeline:
+        recognition = recognize_aiko_english(mono, sample_rate, self.bank)
+        if not recognition.aliases:
+            raise RuntimeError("English frontend recognized no mappable voicebank aliases")
+        hop_seconds = self.extractor.config.hop_samples / sample_rate
+        frame_count = max(1, math.ceil(input_duration / hop_seconds))
+        segments: list[DecodedSegment] = []
+
+        first_start = recognition.aliases[0].start_seconds
+        if first_start >= hop_seconds:
+            segments.append(_silence_segment(0, round(first_start / hop_seconds)))
+        for planned in recognition.aliases:
+            start_frame = max(0, round(planned.start_seconds / hop_seconds))
+            end_frame = min(
+                frame_count,
+                max(start_frame + 1, round(planned.end_seconds / hop_seconds)),
+            )
+            if segments and start_frame > segments[-1].end_frame:
+                segments.append(_silence_segment(segments[-1].end_frame, start_frame))
+            durations = np.array(
+                [section.duration_seconds for section in planned.unit.sections], dtype=np.float64
+            )
+            cumulative = np.concatenate(([0.0], np.cumsum(durations / np.sum(durations))))
+            boundaries = [
+                start_frame + round((end_frame - start_frame) * float(position))
+                for position in cumulative
+            ]
+            boundaries[0], boundaries[-1] = start_frame, end_frame
+            boundaries = _strict_boundaries(boundaries, start_frame, end_frame)
+            section_cost = -math.log(max(planned.confidence, 1e-6)) / len(planned.unit.sections)
+            for section_index, (section, section_start, section_end) in enumerate(
+                zip(planned.unit.sections, boundaries[:-1], boundaries[1:], strict=True)
+            ):
+                if section_end <= section_start:
+                    continue
+                nominal_frames = max(1, round(section.duration_seconds / hop_seconds))
+                segments.append(
+                    DecodedSegment(
+                        planned.unit.id,
+                        planned.alias,
+                        section_index,
+                        section.kind,
+                        section_start,
+                        section_end,
+                        (section_end - section_start) / nominal_frames,
+                        section_cost,
+                        0.0,
+                        0.0,
+                        section_cost,
+                    )
+                )
+        final_end = segments[-1].end_frame
+        if final_end < frame_count:
+            segments.append(_silence_segment(final_end, frame_count))
+        decoded = tuple(segments)
+        path_cost = sum(segment.total_cost for segment in decoded)
+        path = DecodedPath(decoded, path_cost)
+        decode_result = DecodeResult(path, (), frame_count, 0, 0, 0)
+        timeline_segments = tuple(
+            _timeline_segment(segment, hop_seconds, input_duration, frame_count)
+            for segment in decoded
+        )
+        return RecognitionTimeline(
+            source_path,
+            self.bank.root,
+            sample_rate,
+            hop_seconds,
+            input_duration,
+            path_cost,
+            timeline_segments,
+            decode_result,
+            "wav2vec2-ctc-cmudict-aiko-cvvc",
+            recognition.transcript,
+            recognition.unmapped_words,
         )
 
 
@@ -222,3 +324,22 @@ def _timeline_segment(
         segment.transition_cost,
         segment.total_cost,
     )
+
+
+def _silence_segment(start_frame: int, end_frame: int) -> DecodedSegment:
+    return DecodedSegment(
+        None, None, None, "silence", start_frame, end_frame, 1.0, 0.0, 0.0, 0.0, 0.0
+    )
+
+
+def _strict_boundaries(
+    boundaries: list[int], start_frame: int, end_frame: int
+) -> list[int]:
+    """Keep proportional section boundaries ordered within short aliases."""
+    result = boundaries.copy()
+    for index in range(1, len(result) - 1):
+        minimum = result[index - 1] + 1
+        maximum = end_frame - (len(result) - 1 - index)
+        result[index] = min(max(result[index], minimum), max(minimum, maximum))
+    result[0], result[-1] = start_frame, end_frame
+    return result
