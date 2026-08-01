@@ -8,3 +8,6 @@ https://download.pytorch.org/torchaudio/tutorial-assets/Lab41-SRI-VOiCES-src-sp0
 
 The excerpt is retained solely as a compact recorded-human-speech regression fixture.
 
+`voices_sentence.wav` is the complete 3.4-second source recording. It says “I had
+that curiosity beside me at this moment” and is retained for direct phoneme
+recognition and real-voicebank integration tests under the same license.

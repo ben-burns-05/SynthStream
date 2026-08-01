@@ -21,7 +21,13 @@ from synthstream.decoding import (
     SegmentalBeamDecoder,
 )
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
-from synthstream.offline.phonetic import AikoEnglishAliasMap, recognize_aiko_english
+from synthstream.offline.direct_phonemes import (
+    AikoDirectAliasPlanner,
+    DetectedPhone,
+    DirectIPARecognizer,
+    DirectPlannedAlias,
+)
+from synthstream.offline.phonetic import AikoEnglishAliasMap
 from synthstream.voicebank import Voicebank, load_voicebank
 
 
@@ -59,6 +65,8 @@ class RecognitionTimeline:
     recognition_mode: str = "acoustic-segmental"
     transcript: str | None = None
     unmapped_words: tuple[str, ...] = ()
+    detected_phonemes: tuple[str, ...] = ()
+    unmapped_phonemes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-facing timeline representation."""
@@ -74,6 +82,8 @@ class RecognitionTimeline:
             "recognition_mode": self.recognition_mode,
             "transcript": self.transcript,
             "unmapped_words": list(self.unmapped_words),
+            "detected_phonemes": list(self.detected_phonemes),
+            "unmapped_phonemes": list(self.unmapped_phonemes),
             "segments": [asdict(segment) for segment in self.segments],
             "diagnostics": {
                 "frames_processed": self.decode_result.frames_processed,
@@ -162,7 +172,7 @@ class OfflineRecognizer:
                 dtype=np.float32,
             )
         if AikoEnglishAliasMap.supports(self.bank):
-            return self._recognize_aiko_english(
+            return self._recognize_aiko_direct(
                 source_path, mono, target_rate, input_duration
             )
 
@@ -191,14 +201,15 @@ class OfflineRecognizer:
             decode_result,
         )
 
-    def _recognize_aiko_english(
+    def _recognize_aiko_direct(
         self,
         source_path: Path,
         mono: np.ndarray,
         sample_rate: int,
         input_duration: float,
     ) -> RecognitionTimeline:
-        recognition = recognize_aiko_english(mono, sample_rate, self.bank)
+        phones = DirectIPARecognizer().recognize(mono, sample_rate)
+        recognition = AikoDirectAliasPlanner(self.bank).plan(phones)
         if not recognition.aliases:
             raise RuntimeError("English frontend recognized no mappable voicebank aliases")
         hop_seconds = self.extractor.config.hop_samples / sample_rate
@@ -216,16 +227,13 @@ class OfflineRecognizer:
             )
             if segments and start_frame > segments[-1].end_frame:
                 segments.append(_silence_segment(segments[-1].end_frame, start_frame))
-            durations = np.array(
-                [section.duration_seconds for section in planned.unit.sections], dtype=np.float64
+            boundaries = _phone_aware_section_boundaries(
+                planned,
+                recognition.phones,
+                start_frame,
+                end_frame,
+                hop_seconds,
             )
-            cumulative = np.concatenate(([0.0], np.cumsum(durations / np.sum(durations))))
-            boundaries = [
-                start_frame + round((end_frame - start_frame) * float(position))
-                for position in cumulative
-            ]
-            boundaries[0], boundaries[-1] = start_frame, end_frame
-            boundaries = _strict_boundaries(boundaries, start_frame, end_frame)
             section_cost = -math.log(max(planned.confidence, 1e-6)) / len(planned.unit.sections)
             for section_index, (section, section_start, section_end) in enumerate(
                 zip(planned.unit.sections, boundaries[:-1], boundaries[1:], strict=True)
@@ -260,17 +268,17 @@ class OfflineRecognizer:
             for segment in decoded
         )
         return RecognitionTimeline(
-            source_path,
-            self.bank.root,
-            sample_rate,
-            hop_seconds,
-            input_duration,
-            path_cost,
-            timeline_segments,
-            decode_result,
-            "wav2vec2-ctc-cmudict-aiko-cvvc",
-            recognition.transcript,
-            recognition.unmapped_words,
+            source_wav=source_path,
+            voicebank_root=self.bank.root,
+            sample_rate=sample_rate,
+            hop_seconds=hop_seconds,
+            input_duration_seconds=input_duration,
+            path_cost=path_cost,
+            segments=timeline_segments,
+            decode_result=decode_result,
+            recognition_mode="wav2vec2-ipa-ctc-aiko-cvvc",
+            detected_phonemes=tuple(phone.ipa for phone in recognition.phones),
+            unmapped_phonemes=recognition.unmapped_phones,
         )
 
 
@@ -343,3 +351,47 @@ def _strict_boundaries(
         result[index] = min(max(result[index], minimum), max(minimum, maximum))
     result[0], result[-1] = start_frame, end_frame
     return result
+
+
+def _phone_aware_section_boundaries(
+    planned: DirectPlannedAlias,
+    phones: tuple[DetectedPhone, ...],
+    start_frame: int,
+    end_frame: int,
+    hop_seconds: float,
+) -> list[int]:
+    """Place OTO transition sections around an observed acoustic phone boundary."""
+    sections = planned.unit.sections
+    durations = np.array(
+        [section.duration_seconds for section in sections],
+        dtype=np.float64,
+    )
+    cumulative = np.concatenate(([0.0], np.cumsum(durations / np.sum(durations))))
+    boundaries = [
+        start_frame + round((end_frame - start_frame) * float(position))
+        for position in cumulative
+    ]
+    boundaries[0], boundaries[-1] = start_frame, end_frame
+
+    transition_index = next(
+        (index for index, section in enumerate(sections) if section.kind == "transition"),
+        None,
+    )
+    if transition_index is not None and len(planned.phone_indices) >= 2:
+        left = phones[planned.phone_indices[-2]]
+        right = phones[planned.phone_indices[-1]]
+        acoustic_boundary = (left.end_seconds + right.start_seconds) / 2
+        center_frame = round(acoustic_boundary / hop_seconds)
+        transition_frames = max(
+            1,
+            round(
+                (end_frame - start_frame)
+                * durations[transition_index]
+                / np.sum(durations)
+            ),
+        )
+        boundaries[transition_index] = center_frame - transition_frames // 2
+        boundaries[transition_index + 1] = (
+            boundaries[transition_index] + transition_frames
+        )
+    return _strict_boundaries(boundaries, start_frame, end_frame)

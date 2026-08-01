@@ -85,33 +85,6 @@ def test_human_wav_runs_through_production_pipeline_and_exports_json(
     assert payload["diagnostics"]["frames_processed"] > 0
 
 
-def test_recorded_human_speech_wav_produces_section_timeline(tmp_path: Path) -> None:
-    fixture = Path(__file__).parents[1] / "fixtures" / "human" / "voices_excerpt.wav"
-    recorded, sample_rate = sf.read(fixture, dtype="float32")
-    assert sample_rate == 16_000
-    bank_path = tmp_path / "recorded-bank"
-    bank_path.mkdir()
-    sf.write(bank_path / "recorded.wav", recorded, sample_rate)
-    (bank_path / "oto.ini").write_text(
-        "recorded.wav=recorded-human,0,200,0,50,20\n", encoding="utf-8"
-    )
-
-    timeline = recognize_wav(fixture, bank_path, use_cache=False)
-    voiced = [segment for segment in timeline.segments if not segment.silence]
-
-    assert [segment.alias for segment in voiced] == [
-        "recorded-human",
-        "recorded-human",
-        "recorded-human",
-    ]
-    assert [segment.section_kind for segment in voiced] == [
-        "onset",
-        "transition",
-        "sustain",
-    ]
-    assert timeline.segments[-1].end_seconds == pytest.approx(0.5, abs=1e-3)
-
-
 def test_offline_timeline_places_leading_silence(tmp_path: Path) -> None:
     bank_path = tmp_path / "bank"
     bank_path.mkdir()

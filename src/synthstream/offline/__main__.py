@@ -27,6 +27,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Transcript: {timeline.transcript}")
     if timeline.unmapped_words:
         print(f"Unmapped words: {', '.join(timeline.unmapped_words)}")
+    if timeline.detected_phonemes:
+        print(f"Detected phonemes: {' '.join(timeline.detected_phonemes)}")
+    if timeline.unmapped_phonemes:
+        print(f"Unmapped phonemes: {', '.join(timeline.unmapped_phonemes)}")
     return 0
 
 

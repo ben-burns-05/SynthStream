@@ -134,18 +134,22 @@ Milestone 7 exports a machine-readable real-voicebank timeline from prerecorded 
 synthstream-recognize human.wav voicebank/my-bank --output timeline.json
 ```
 
-For Kikyuune Aiko RockLoud CVVC EN, the production path uses wav2vec2 CTC English
-recognition, CMUdict pronunciations, and an explicit mapping into the phoneme notation
-documented by that bank. It emits only aliases that exist in the loaded bank, expands each
-alias into its real OTO-derived sections, reports words that could not be mapped, and retains
-silence in the timeline. The first use downloads the approximately 360 MB torchaudio model
-weights into PyTorch's model cache.
+For Kikyuune Aiko RockLoud CVVC EN, the production path uses a wav2vec2 IPA CTC
+model to detect phones directly from the waveform. It does not recognize words and does
+not invoke a pronunciation dictionary or G2P. The detected IPA phones are mapped into
+aliases that actually exist in the loaded bank. Each alias expands into its real OTO-derived
+onset, transition, and sustain sections. The transition section is centered on the observed
+acoustic phone boundary, so the three sections receive independent stretch ratios rather
+than merely sharing one fixed duration.
+
+The first use downloads the approximately 1.3 GB phoneme-model weights into the Hugging
+Face cache; subsequent offline runs load that cache without making a network request.
 
 For banks without a verified phoneme map, the earlier acoustic segmental decoder remains a
 fallback and the JSON field `recognition_mode` says `acoustic-segmental`. Its output must not be
 treated as semantically validated. A supported Aiko result instead reports
-`wav2vec2-ctc-cmudict-aiko-cvvc`, includes the recognized `transcript`, and lists any
-`unmapped_words`.
+`wav2vec2-ipa-ctc-aiko-cvvc`, leaves `transcript` empty, and records the direct acoustic
+output in `detected_phonemes` and `unmapped_phonemes`.
 
 The timeline records each selected voicebank unit and section, start/end time, duration,
 stretch ratio, silence state, costs, and diagnostics. Input WAV files may be mono or
