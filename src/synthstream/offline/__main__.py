@@ -1,6 +1,7 @@
 """Command-line entry point for offline timeline recognition."""
 
 import argparse
+import sys
 from collections.abc import Sequence
 
 from synthstream.offline.recognizer import recognize_wav
@@ -28,10 +29,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if timeline.unmapped_words:
         print(f"Unmapped words: {', '.join(timeline.unmapped_words)}")
     if timeline.detected_phonemes:
-        print(f"Detected phonemes: {' '.join(timeline.detected_phonemes)}")
+        print(_console_safe(f"Detected phonemes: {' '.join(timeline.detected_phonemes)}"))
     if timeline.unmapped_phonemes:
         print(f"Unmapped phonemes: {', '.join(timeline.unmapped_phonemes)}")
     return 0
+
+
+def _console_safe(value: str) -> str:
+    """Keep IPA diagnostics printable on legacy Windows console encodings."""
+    encoding = sys.stdout.encoding or "utf-8"
+    return value.encode(encoding, errors="backslashreplace").decode(encoding)
 
 
 if __name__ == "__main__":
