@@ -1,4 +1,4 @@
-"""Direct audio-to-IPA recognition and Aiko CVVC alias planning."""
+"""Direct audio-to-IPA recognition and inventory-aware alias planning."""
 
 from __future__ import annotations
 
@@ -13,6 +13,11 @@ import torch
 from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCTC
 
+from synthstream.offline.voicebank_phonemizer import (
+    VoicebankProfile,
+    detect_voicebank_profile,
+    resolve_alias_candidates,
+)
 from synthstream.voicebank import Voicebank, VoicebankUnit
 
 FloatArray = npt.NDArray[np.float32]
@@ -28,13 +33,6 @@ class DetectedPhone:
 
 
 @dataclass(frozen=True, slots=True)
-class DirectPhoneticRecognition:
-    phones: tuple[DetectedPhone, ...]
-    aliases: tuple[DirectPlannedAlias, ...]
-    unmapped_phones: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class DirectPlannedAlias:
     """A real voicebank unit anchored to direct acoustic phone detections."""
 
@@ -44,6 +42,13 @@ class DirectPlannedAlias:
     start_seconds: float
     end_seconds: float
     confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class DirectPhoneticRecognition:
+    phones: tuple[DetectedPhone, ...]
+    aliases: tuple[DirectPlannedAlias, ...]
+    unmapped_phones: tuple[str, ...]
 
 
 class DirectIPARecognizer:
@@ -118,92 +123,69 @@ def _load_model_assets() -> tuple[Any, str]:
     return model, vocab_path
 
 
-class AikoDirectAliasPlanner:
-    """Translate detected IPA phones into existing Aiko CVVC recordings."""
+class DirectAliasPlanner:
+    """Resolve direct IPA detections with a detected bank-specific profile."""
 
-    _SYMBOLS = {
-        "aɪ": "I", "æ": "@", "ɑː": "9", "ɑ": "9", "ə": "u",
-        "ɐ": "u", "ʌ": "u", "ɪ": "i", "i": "E", "iː": "E",
-        "u": "o", "uː": "o", "oʊ": "O", "ɛ": "e", "ɜː": "3",
-        "h": "h", "d": "d", "ɾ": "d", "ð": "dh", "t": "t",
-        "k": "k", "j": "y", "ɹ": "r", "r": "r", "s": "s",
-        "b": "b", "m": "m", "n": "n", "ŋ": "ng", "l": "l",
-        "w": "w", "f": "f", "v": "v", "θ": "th", "ʃ": "sh",
-        "ʒ": "zh", "p": "p", "ɡ": "g",
-    }
-    _VOWELS = {"I", "@", "9", "u", "i", "E", "o", "O", "e", "3"}
-
-    def __init__(self, bank: Voicebank) -> None:
+    def __init__(self, bank: Voicebank, profile: VoicebankProfile | None = None) -> None:
         self._units = {unit.alias: unit for unit in bank.units}
+        self.bank = bank
+        self.profile = profile or detect_voicebank_profile(bank).profile
 
     def plan(self, phones: tuple[DetectedPhone, ...]) -> DirectPhoneticRecognition:
-        mapped = [self._SYMBOLS.get(phone.ipa) for phone in phones]
+        if self.profile is None:
+            return DirectPhoneticRecognition(
+                phones,
+                (),
+                tuple(phone.ipa for phone in phones),
+            )
+        candidates = resolve_alias_candidates(
+            tuple(phone.ipa for phone in phones),
+            self.bank,
+            self.profile,
+        )
+        mapped = [self.profile.symbol_for(phone.ipa) for phone in phones]
+        covered = {index for candidate in candidates for index in candidate.phone_indices}
         unmapped = tuple(
             phone.ipa
-            for phone, symbol in zip(phones, mapped, strict=True)
-            if symbol is None
+            for index, (phone, symbol) in enumerate(zip(phones, mapped, strict=True))
+            if symbol is None or index not in covered
         )
-        candidates: list[tuple[str, tuple[int, ...]]] = []
-        vowel_indices = [index for index, symbol in enumerate(mapped) if symbol in self._VOWELS]
-        for number, vowel_index in enumerate(vowel_indices):
-            vowel = mapped[vowel_index]
-            assert vowel is not None
-            previous_vowel = vowel_indices[number - 1] if number else -1
-            onset_indices = tuple(
-                index for index in range(previous_vowel + 1, vowel_index + 1) if mapped[index]
-            )
-            if onset_indices[:-1]:
-                suffixes = [
-                    (
-                        "".join(mapped[index] or "" for index in onset_indices[start:]),
-                        onset_indices[start:],
-                    )
-                    for start in range(len(onset_indices) - 1)
-                ]
-            else:
-                suffixes = [("-" + vowel, onset_indices), (vowel, onset_indices)]
-            selected = next(
-                ((alias, indices) for alias, indices in suffixes if alias in self._units),
-                None,
-            )
-            if selected is not None:
-                candidates.append(selected)
-            next_vowel = (
-                vowel_indices[number + 1]
-                if number + 1 < len(vowel_indices)
-                else len(phones)
-            )
-            if vowel_index + 1 < next_vowel and mapped[vowel_index + 1]:
-                alias = vowel + (mapped[vowel_index + 1] or "")
-                if alias in self._units:
-                    candidates.append((alias, (vowel_index, vowel_index + 1)))
-
         if not candidates:
             return DirectPhoneticRecognition(phones, (), unmapped)
         anchors = [
-            np.mean(
-                [
-                    (phones[index].start_seconds + phones[index].end_seconds) / 2
-                    for index in indices
-                ]
+            float(
+                np.mean(
+                    [
+                        (phones[index].start_seconds + phones[index].end_seconds) / 2
+                        for index in candidate.phone_indices
+                    ]
+                )
             )
-            for _, indices in candidates
+            for candidate in candidates
         ]
-        boundaries = [phones[candidates[0][1][0]].start_seconds]
+        boundaries = [phones[candidates[0].phone_indices[0]].start_seconds]
         boundaries.extend(
             float((left + right) / 2)
             for left, right in zip(anchors, anchors[1:], strict=False)
         )
-        boundaries.append(phones[candidates[-1][1][-1]].end_seconds)
+        boundaries.append(phones[candidates[-1].phone_indices[-1]].end_seconds)
         planned = tuple(
             DirectPlannedAlias(
-                alias,
-                self._units[alias],
-                indices,
+                candidate.alias,
+                self._units[candidate.alias],
+                candidate.phone_indices,
                 boundaries[index],
                 boundaries[index + 1],
-                float(np.mean([phones[i].confidence for i in indices])),
+                float(np.mean([phones[i].confidence for i in candidate.phone_indices])),
             )
-            for index, (alias, indices) in enumerate(candidates)
+            for index, candidate in enumerate(candidates)
         )
         return DirectPhoneticRecognition(phones, planned, unmapped)
+
+
+class AikoDirectAliasPlanner(DirectAliasPlanner):
+    """Compatibility wrapper for the original Aiko-specific public class."""
+
+    def __init__(self, bank: Voicebank) -> None:
+        capability = detect_voicebank_profile(bank)
+        super().__init__(bank, capability.profile)

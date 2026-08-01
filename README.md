@@ -134,22 +134,24 @@ Milestone 7 exports a machine-readable real-voicebank timeline from prerecorded 
 synthstream-recognize human.wav voicebank/my-bank --output timeline.json
 ```
 
-For Kikyuune Aiko RockLoud CVVC EN, the production path uses a wav2vec2 IPA CTC
-model to detect phones directly from the waveform. It does not recognize words and does
-not invoke a pronunciation dictionary or G2P. The detected IPA phones are mapped into
-aliases that actually exist in the loaded bank. Each alias expands into its real OTO-derived
-onset, transition, and sustain sections. The transition section is centered on the observed
-acoustic phone boundary, so the three sections receive independent stretch ratios rather
-than merely sharing one fixed duration.
+The production path uses a wav2vec2 IPA CTC model to detect phones directly from the
+waveform. It does not recognize words and does not invoke a pronunciation dictionary or
+G2P. A bank-specific phonemizer profile then maps the phones into aliases that actually
+exist in the loaded bank. The current supported English subset is Aiko-style CVVC, English
+VCCV, and English Presamp/CVVC banks with `presamp.ini`. Each alias expands into its real
+OTO-derived onset, transition, and sustain sections. The transition section is centered on
+the observed acoustic phone boundary, so the three sections receive independent stretch
+ratios rather than merely sharing one fixed duration.
 
 The first use downloads the approximately 1.3 GB phoneme-model weights into the Hugging
 Face cache; subsequent offline runs load that cache without making a network request.
 
-For banks without a verified phoneme map, the earlier acoustic segmental decoder remains a
-fallback and the JSON field `recognition_mode` says `acoustic-segmental`. Its output must not be
-treated as semantically validated. A supported Aiko result instead reports
-`wav2vec2-ipa-ctc-aiko-cvvc`, leaves `transcript` empty, and records the direct acoustic
-output in `detected_phonemes` and `unmapped_phonemes`.
+For banks without a verified profile, the earlier acoustic segmental decoder remains a
+fallback and the JSON field `recognition_mode` says `acoustic-segmental`. Its output must not
+be treated as semantically validated. A supported result reports a profile-specific mode
+such as `wav2vec2-ipa-ctc-aiko-cvvc`, leaves `transcript` empty, and records the direct
+acoustic output in `detected_phonemes` and `unmapped_phonemes`. It also reports the profile,
+profile confidence, and probe alias coverage used to decide whether the bank is supported.
 
 The timeline records each selected voicebank unit and section, start/end time, duration,
 stretch ratio, silence state, costs, and diagnostics. Input WAV files may be mono or

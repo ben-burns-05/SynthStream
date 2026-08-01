@@ -51,3 +51,6 @@ def test_recorded_english_produces_semantic_real_aiko_alias_timeline() -> None:
     assert payload["transcript"] is None
     assert payload["detected_phonemes"] == list(timeline.detected_phonemes)
     assert payload["recognition_mode"] == "wav2vec2-ipa-ctc-aiko-cvvc"
+    assert payload["voicebank_profile"] == "aiko-cvvc"
+    assert payload["voicebank_profile_confidence"] >= 0.9
+    assert payload["alias_coverage"] >= 0.9

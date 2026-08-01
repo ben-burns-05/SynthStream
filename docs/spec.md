@@ -1372,6 +1372,15 @@ Run real human WAV recordings through the production matcher and decoder.
 
 Add matching/regression tests.
 
+## Milestone 7.5 — Voicebank Phonemizer Profiles
+
+Separate direct acoustic IPA recognition from voicebank-format alias resolution. Detect and
+validate a supported profile against the complete loaded alias inventory, read singer-local
+`presamp.ini` metadata where present, resolve CVVC/VCCV/Presamp fallback combinations, and
+report profile confidence and alias coverage. The initial supported subset is English Aiko-style
+CVVC, English VCCV, and English Presamp/CVVC. Unsupported or ambiguous banks must remain
+explicitly marked instead of receiving fabricated semantic aliases.
+
 ## Milestone 8 — Offline WAV → Voicebank Synthesis
 
 Connect the decoder to the renderer so a human WAV produces both:

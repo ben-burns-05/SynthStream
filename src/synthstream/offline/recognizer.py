@@ -22,12 +22,12 @@ from synthstream.decoding import (
 )
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
 from synthstream.offline.direct_phonemes import (
-    AikoDirectAliasPlanner,
     DetectedPhone,
+    DirectAliasPlanner,
     DirectIPARecognizer,
     DirectPlannedAlias,
 )
-from synthstream.offline.phonetic import AikoEnglishAliasMap
+from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.voicebank import Voicebank, load_voicebank
 
 
@@ -67,6 +67,9 @@ class RecognitionTimeline:
     unmapped_words: tuple[str, ...] = ()
     detected_phonemes: tuple[str, ...] = ()
     unmapped_phonemes: tuple[str, ...] = ()
+    voicebank_profile: str | None = None
+    voicebank_profile_confidence: float = 0.0
+    alias_coverage: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         """Return the stable JSON-facing timeline representation."""
@@ -84,6 +87,9 @@ class RecognitionTimeline:
             "unmapped_words": list(self.unmapped_words),
             "detected_phonemes": list(self.detected_phonemes),
             "unmapped_phonemes": list(self.unmapped_phonemes),
+            "voicebank_profile": self.voicebank_profile,
+            "voicebank_profile_confidence": self.voicebank_profile_confidence,
+            "alias_coverage": self.alias_coverage,
             "segments": [asdict(segment) for segment in self.segments],
             "diagnostics": {
                 "frames_processed": self.decode_result.frames_processed,
@@ -118,7 +124,8 @@ class OfflineRecognizer:
     ) -> None:
         self.bank = bank
         self.extractor = FeatureExtractor(analysis_config)
-        if AikoEnglishAliasMap.supports(bank):
+        self.phonemizer_capability = detect_voicebank_profile(bank)
+        if self.phonemizer_capability.supported:
             self.feature_index = None
             self.matcher = None
             self.decoder = None
@@ -171,8 +178,8 @@ class OfflineRecognizer:
                 resample_poly(mono, target_rate // divisor, source_rate // divisor),
                 dtype=np.float32,
             )
-        if AikoEnglishAliasMap.supports(self.bank):
-            return self._recognize_aiko_direct(
+        if self.phonemizer_capability.supported:
+            return self._recognize_direct(
                 source_path, mono, target_rate, input_duration
             )
 
@@ -199,9 +206,10 @@ class OfflineRecognizer:
             decode_result.best_path.total_cost,
             timeline_segments,
             decode_result,
+            voicebank_profile=None,
         )
 
-    def _recognize_aiko_direct(
+    def _recognize_direct(
         self,
         source_path: Path,
         mono: np.ndarray,
@@ -209,11 +217,15 @@ class OfflineRecognizer:
         input_duration: float,
     ) -> RecognitionTimeline:
         phones = DirectIPARecognizer().recognize(mono, sample_rate)
-        recognition = AikoDirectAliasPlanner(self.bank).plan(phones)
+        profile = self.phonemizer_capability.profile
+        if profile is None:
+            raise RuntimeError("direct phoneme profile is unavailable")
+        recognition = DirectAliasPlanner(self.bank, profile).plan(phones)
         if not recognition.aliases:
             raise RuntimeError("English frontend recognized no mappable voicebank aliases")
         hop_seconds = self.extractor.config.hop_samples / sample_rate
         frame_count = max(1, math.ceil(input_duration / hop_seconds))
+        active_end_frame = _estimate_active_end_frame(mono, sample_rate, hop_seconds, frame_count)
         segments: list[DecodedSegment] = []
 
         first_start = recognition.aliases[0].start_seconds
@@ -222,9 +234,11 @@ class OfflineRecognizer:
         for planned in recognition.aliases:
             start_frame = max(0, round(planned.start_seconds / hop_seconds))
             end_frame = min(
-                frame_count,
+                active_end_frame,
                 max(start_frame + 1, round(planned.end_seconds / hop_seconds)),
             )
+            if end_frame <= start_frame:
+                continue
             if segments and start_frame > segments[-1].end_frame:
                 segments.append(_silence_segment(segments[-1].end_frame, start_frame))
             boundaries = _phone_aware_section_boundaries(
@@ -276,9 +290,12 @@ class OfflineRecognizer:
             path_cost=path_cost,
             segments=timeline_segments,
             decode_result=decode_result,
-            recognition_mode="wav2vec2-ipa-ctc-aiko-cvvc",
+            recognition_mode=f"wav2vec2-ipa-ctc-{profile.name}",
             detected_phonemes=tuple(phone.ipa for phone in recognition.phones),
             unmapped_phonemes=recognition.unmapped_phones,
+            voicebank_profile=profile.name,
+            voicebank_profile_confidence=self.phonemizer_capability.confidence,
+            alias_coverage=self.phonemizer_capability.alias_coverage,
         )
 
 
@@ -338,6 +355,29 @@ def _silence_segment(start_frame: int, end_frame: int) -> DecodedSegment:
     return DecodedSegment(
         None, None, None, "silence", start_frame, end_frame, 1.0, 0.0, 0.0, 0.0, 0.0
     )
+
+
+def _estimate_active_end_frame(
+    samples: np.ndarray,
+    sample_rate: int,
+    hop_seconds: float,
+    frame_count: int,
+) -> int:
+    """Trim CTC's terminal phone extension when the waveform has fallen silent."""
+    window = max(1, round(sample_rate * 0.02))
+    rms = np.sqrt(
+        np.add.reduceat(samples.astype(np.float64) ** 2, np.arange(0, len(samples), window))
+        / np.maximum(1, np.minimum(window, len(samples) - np.arange(0, len(samples), window)))
+    )
+    if not len(rms) or float(np.max(rms)) <= 0:
+        return frame_count
+    threshold = max(0.008, float(np.max(rms)) * 0.08)
+    active = np.flatnonzero(rms >= threshold)
+    if not len(active):
+        return frame_count
+    end_seconds = min(len(samples) / sample_rate, (int(active[-1]) + 1) * window / sample_rate)
+    end_seconds = min(len(samples) / sample_rate, math.ceil(end_seconds / 0.05) * 0.05)
+    return min(frame_count, max(1, math.ceil(end_seconds / hop_seconds)))
 
 
 def _strict_boundaries(
