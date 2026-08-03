@@ -201,3 +201,28 @@ The optimized generic acoustic path processes the 3.4-second Aiko human-speech f
 approximately 1.3 seconds for decoding plus 0.2 seconds for feature extraction on the
 development CPU. Exact times vary by hardware and bank size; the streaming defaults trade
 some exhaustive alternatives for bounded live latency.
+
+## Live microphone conversion
+
+Milestone 10 connects the same pipeline to a duplex microphone/output backend:
+
+```python
+from synthstream.audio import SoundDeviceDuplexBackend
+from synthstream.live import LiveVoicebankEngine
+from synthstream.voicebank import load_voicebank
+
+engine = LiveVoicebankEngine(
+    load_voicebank("voicebank/my-bank"),
+    SoundDeviceDuplexBackend(input_device=None, output_device=None),
+)
+engine.start()  # bounded audio callback plus background processing worker
+try:
+    ...
+finally:
+    engine.stop(flush=True)
+```
+
+The callback only moves fixed-size samples through bounded ring buffers. The worker analyzes
+short chunks, feeds the Milestone 9 streaming decoder, renders committed OTO sections, and
+queues output audio. `start(background=False)` plus `process_available()` provides a
+deterministic worker-free mode for tests and integrations that own their processing loop.
