@@ -12,12 +12,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("human_wav", help="human speech WAV to analyze")
     parser.add_argument("voicebank", help="UTAU voicebank directory")
     parser.add_argument("--output", "-o", required=True, help="timeline JSON output path")
+    parser.add_argument(
+        "--output-wav",
+        help="optional synthesized voicebank WAV output path",
+    )
+    parser.add_argument(
+        "--output-sample-rate",
+        type=int,
+        help="output WAV sample rate; defaults to the voicebank rate",
+    )
+    parser.add_argument(
+        "--pitch-ratio",
+        type=float,
+        default=1.0,
+        help="global voicebank pitch ratio for synthesized output",
+    )
     arguments = parser.parse_args(argv)
 
     timeline = recognize_wav(
         arguments.human_wav,
         arguments.voicebank,
         output_json=arguments.output,
+        output_wav=arguments.output_wav,
+        output_sample_rate=arguments.output_sample_rate,
+        pitch_ratio=arguments.pitch_ratio,
     )
     print(
         f"Recognized {len(timeline.segments)} segments "
@@ -32,6 +50,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(_console_safe(f"Detected phonemes: {' '.join(timeline.detected_phonemes)}"))
     if timeline.unmapped_phonemes:
         print(f"Unmapped phonemes: {', '.join(timeline.unmapped_phonemes)}")
+    if arguments.output_wav:
+        print(f"Voicebank WAV: {arguments.output_wav}")
     return 0
 
 

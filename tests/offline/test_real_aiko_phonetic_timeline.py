@@ -2,12 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from synthstream.offline import OfflineRecognizer
+from synthstream.offline import OfflineRecognizer, synthesize_timeline
 
 PROJECT_ROOT = Path(__file__).parents[2]
 
 
-def test_recorded_english_produces_semantic_real_aiko_alias_timeline() -> None:
+def test_recorded_english_produces_semantic_real_aiko_alias_timeline(tmp_path: Path) -> None:
     bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
     if not bank_path.is_dir():
         pytest.skip("local Aiko development voicebank is not installed")
@@ -16,6 +16,8 @@ def test_recorded_english_produces_semantic_real_aiko_alias_timeline() -> None:
     timeline = recognizer.recognize(
         PROJECT_ROOT / "tests" / "fixtures" / "human" / "voices_sentence.wav"
     )
+    synthesized = synthesize_timeline(timeline, recognizer.bank)
+    output_path = synthesized.write_wav(tmp_path / "aiko-output.wav")
     voiced = [segment for segment in timeline.segments if not segment.silence]
     aliases = list(dict.fromkeys(segment.alias for segment in voiced))
 
@@ -54,3 +56,10 @@ def test_recorded_english_produces_semantic_real_aiko_alias_timeline() -> None:
     assert payload["voicebank_profile"] == "aiko-cvvc"
     assert payload["voicebank_profile_confidence"] >= 0.9
     assert payload["alias_coverage"] >= 0.9
+    assert output_path.is_file()
+    assert synthesized.sample_rate == 44_100
+    assert synthesized.duration_seconds == pytest.approx(3.4, abs=0.01)
+    assert synthesized.voiced_segments > 50
+    assert synthesized.silence_segments >= 1
+    assert synthesized.samples.dtype == "float32"
+    assert synthesized.samples.max() > 0.05

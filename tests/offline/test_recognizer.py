@@ -62,9 +62,13 @@ def test_human_wav_runs_through_production_pipeline_and_exports_json(
         human_path,
         bank_path,
         output_json=output_path,
+        output_wav=tmp_path / "results" / "voicebank.wav",
         use_cache=False,
     )
     payload = json.loads(output_path.read_text(encoding="utf-8"))
+    rendered, rendered_rate = sf.read(
+        tmp_path / "results" / "voicebank.wav", dtype="float32"
+    )
 
     voiced = [segment for segment in timeline.segments if not segment.silence]
     assert [segment.alias for segment in voiced] == ["a", "a", "a"]
@@ -83,6 +87,9 @@ def test_human_wav_runs_through_production_pipeline_and_exports_json(
     assert payload["version"] == 1
     assert payload["segments"][0]["alias"] == "a"
     assert payload["diagnostics"]["frames_processed"] > 0
+    assert rendered_rate == 16_000
+    assert len(rendered) == 8_000
+    assert np.max(np.abs(rendered)) > 0.1
 
 
 def test_offline_timeline_places_leading_silence(tmp_path: Path) -> None:
@@ -113,11 +120,22 @@ def test_offline_command_line_entry_point_writes_timeline(
     human_path = tmp_path / "human.wav"
     sf.write(human_path, _speech_like_unit(16_000), 16_000)
     output_path = tmp_path / "timeline.json"
+    output_wav = tmp_path / "voicebank.wav"
 
-    exit_code = main([str(human_path), str(bank_path), "--output", str(output_path)])
+    exit_code = main(
+        [
+            str(human_path),
+            str(bank_path),
+            "--output",
+            str(output_path),
+            "--output-wav",
+            str(output_wav),
+        ]
+    )
 
     assert exit_code == 0
     assert output_path.is_file()
+    assert output_wav.is_file()
     assert "Recognized" in capsys.readouterr().out
 
 

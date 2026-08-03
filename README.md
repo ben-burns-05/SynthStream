@@ -134,6 +134,20 @@ Milestone 7 exports a machine-readable real-voicebank timeline from prerecorded 
 synthstream-recognize human.wav voicebank/my-bank --output timeline.json
 ```
 
+Milestone 8 can render that same timeline into a voicebank-derived WAV in the same run:
+
+```powershell
+synthstream-recognize human.wav voicebank/my-bank `
+  --output timeline.json `
+  --output-wav voicebank-output.wav
+```
+
+The renderer selects each timeline segment's real OTO unit and section, stretches it to the
+detected duration, resamples voicebank recordings to one output rate, and writes actual
+voicebank audio. Silence entries remain silence. The default output rate is the first loaded
+voicebank unit's sample rate; `--output-sample-rate` can override it. `--pitch-ratio` applies a
+single global pitch ratio while per-phone pitch transfer remains future work.
+
 The production path uses a wav2vec2 IPA CTC model to detect phones directly from the
 waveform. It does not recognize words and does not invoke a pronunciation dictionary or
 G2P. A bank-specific phonemizer profile then maps the phones into aliases that actually

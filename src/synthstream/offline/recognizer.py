@@ -304,6 +304,10 @@ def recognize_wav(
     voicebank_root: str | Path,
     *,
     output_json: str | Path | None = None,
+    output_wav: str | Path | None = None,
+    output_sample_rate: int | None = None,
+    pitch_ratio: float = 1.0,
+    output_gain: float = 1.0,
     analysis_config: AnalysisConfig | None = None,
     match_weights: MatchWeights | None = None,
     decoder_config: DecoderConfig | None = None,
@@ -320,6 +324,17 @@ def recognize_wav(
     timeline = recognizer.recognize(human_wav)
     if output_json is not None:
         timeline.write_json(output_json)
+    if output_wav is not None:
+        from synthstream.offline.synthesis import synthesize_timeline
+
+        result = synthesize_timeline(
+            timeline,
+            recognizer.bank,
+            output_sample_rate=output_sample_rate,
+            pitch_ratio=pitch_ratio,
+            output_gain=output_gain,
+        )
+        result.write_wav(output_wav)
     return timeline
 
 
