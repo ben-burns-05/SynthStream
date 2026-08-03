@@ -170,3 +170,24 @@ profile confidence, and probe alias coverage used to decide whether the bank is 
 The timeline records each selected voicebank unit and section, start/end time, duration,
 stretch ratio, silence state, costs, and diagnostics. Input WAV files may be mono or
 multichannel and are resampled to the configured analysis rate when necessary.
+
+## Streaming decoder and lookahead
+
+Milestone 9 adds incremental decoding for the live path. Feature batches can be delivered
+in callback-sized chunks while the beam and section-score cache stay alive between updates:
+
+```python
+stream = decoder.stream(lookahead_frames=3)
+update = stream.push(first_feature_chunk)
+for segment in update.committed_segments:
+    consume_committed_segment(segment)
+
+provisional = update.provisional_path  # may change with later chunks
+final = stream.push(last_feature_chunk, final=True)
+```
+
+Committed segments trail the newest input by the configured fixed lag and must be shared by
+the surviving beam hypotheses. The provisional path remains inspectable for diagnostics and
+can be corrected by future evidence before commitment. `finish()` can be used instead of a
+final push when no additional feature chunk remains. Milestone 10 will connect this decoder
+to live microphone analysis and rendering.

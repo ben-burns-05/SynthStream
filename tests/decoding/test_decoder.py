@@ -5,7 +5,11 @@ import pytest
 import soundfile as sf
 
 from synthstream.analysis import AnalysisConfig, FeatureBatch, FeatureExtractor
-from synthstream.decoding import DecoderConfig, SegmentalBeamDecoder
+from synthstream.decoding import (
+    DecoderConfig,
+    SegmentalBeamDecoder,
+    StreamingSegmentalBeamDecoder,
+)
 from synthstream.matching import SectionFeatureIndex, SectionMatcher, SectionMatchScore
 from synthstream.matching.index import SectionTemplate
 from synthstream.voicebank import load_voicebank
@@ -219,3 +223,61 @@ def test_rejects_empty_feature_batch() -> None:
 
     with pytest.raises(ValueError, match="empty"):
         decoder.decode(_blank_features(0))
+
+
+def _slice_features(features: FeatureBatch, start: int, end: int) -> FeatureBatch:
+    return FeatureBatch(
+        features.frame_times_seconds[start:end],
+        features.log_mel[start:end],
+        features.delta_mel[start:end],
+        features.normalized_energy[start:end],
+        features.delta_energy[start:end],
+        features.spectral_flux[start:end],
+        features.spectral_flatness[start:end],
+        features.periodicity[start:end],
+        features.f0_hz[start:end],
+        features.voiced[start:end],
+        features.rms_energy[start:end],
+    )
+
+
+def test_streaming_decoder_matches_batch_and_emits_fixed_lag_commits(
+    tmp_path: Path,
+) -> None:
+    _make_sequence_bank(tmp_path)
+    decoder, extractor = _real_decoder(tmp_path)
+    features = extractor.analyze(_piecewise_unit((220, 330, 440)))
+    expected = decoder.decode(features).best_path
+
+    stream = decoder.stream(lookahead_frames=2)
+    first = stream.push(_slice_features(features, 0, 4))
+    second = stream.push(_slice_features(features, 4, 8))
+    final = stream.push(_slice_features(features, 8, features.frame_count), final=True)
+
+    assert first.committed_until_frame <= 2
+    assert second.frames_processed == 8
+    assert final.provisional_path.segments == expected.segments
+    committed = first.committed_segments + second.committed_segments + final.committed_segments
+    assert committed == expected.segments
+    assert final.committed_path.segments == expected.segments
+
+
+def test_streaming_future_evidence_stays_uncommitted_until_final() -> None:
+    decoder = StreamingSegmentalBeamDecoder(
+        FutureEvidenceMatcher(),  # type: ignore[arg-type]
+        config=DecoderConfig(maximum_hypotheses=32, beam_threshold=20),
+        lookahead_frames=2,
+    )
+
+    early = decoder.push(_blank_features(2))
+    assert early.committed_segments == ()
+
+    final = decoder.push(_blank_features(3), final=True)
+    assert [segment.alias for segment in final.provisional_path.segments] == ["b", "b"]
+    assert [segment.alias for segment in final.committed_segments] == ["b", "b"]
+
+
+@pytest.mark.parametrize("lookahead_frames", [-1])
+def test_streaming_decoder_rejects_invalid_lookahead(lookahead_frames: int) -> None:
+    with pytest.raises(ValueError, match="lookahead"):
+        StreamingSegmentalBeamDecoder(FutureEvidenceMatcher(), lookahead_frames=lookahead_frames)  # type: ignore[arg-type]

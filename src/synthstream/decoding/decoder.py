@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -119,6 +120,15 @@ class SegmentalBeamDecoder:
         }
         self._starts = tuple(unit_templates[0] for unit_templates in self._units.values())
         self._next = self._build_within_unit_transitions()
+
+    def stream(self, *, lookahead_frames: int = 3) -> StreamingSegmentalBeamDecoder:
+        """Create an incremental decoder with fixed-lag commitment.
+
+        The returned decoder retains the active beam between feature chunks.  Its
+        provisional path can change as new frames arrive, while committed
+        segments trail the input by ``lookahead_frames`` frames.
+        """
+        return StreamingSegmentalBeamDecoder(self, lookahead_frames=lookahead_frames)
 
     def decode(self, human: FeatureBatch) -> DecodeResult:
         """Decode a complete feature batch and return traceback-ready paths."""
@@ -357,3 +367,258 @@ class SegmentalBeamDecoder:
         ]
         kept = tuple(within_beam[: self.config.maximum_hypotheses])
         return kept, len(candidates) - len(kept)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamingDecodeResult:
+    """One update from an incremental decoder.
+
+    ``committed_segments`` contains only the newly safe segments from this
+    update.  ``provisional_path`` is the current best path and may be revised
+    by later feature chunks.  ``decode_result`` retains the full beam
+    diagnostics for observability.
+    """
+
+    decode_result: DecodeResult
+    committed_segments: tuple[DecodedSegment, ...]
+    committed_path: DecodedPath
+    committed_until_frame: int
+    lookahead_frames: int
+    is_final: bool
+
+    @property
+    def provisional_path(self) -> DecodedPath:
+        """Return the best path before fixed-lag commitment is applied."""
+        return self.decode_result.best_path
+
+    @property
+    def frames_processed(self) -> int:
+        """Number of feature frames represented by this update."""
+        return self.decode_result.frames_processed
+
+
+class StreamingSegmentalBeamDecoder:
+    """Incremental segmental decoding with delayed fixed-lag commitment.
+
+    Feature batches are appended in callback-sized chunks.  Only newly reached
+    end frames are searched, while the existing beam and score cache are kept
+    alive.  Before finalization, a segment is emitted only when it is shared by
+    every surviving hypothesis and ends before the configured lookahead lag.
+    """
+
+    def __init__(
+        self,
+        decoder: SegmentalBeamDecoder | SectionMatcher,
+        config: DecoderConfig | None = None,
+        *,
+        lookahead_frames: int = 3,
+    ) -> None:
+        if lookahead_frames < 0:
+            raise ValueError("lookahead_frames must be non-negative")
+        self.decoder = (
+            decoder
+            if isinstance(decoder, SegmentalBeamDecoder)
+            else SegmentalBeamDecoder(decoder, config)
+        )
+        self.lookahead_frames = lookahead_frames
+        self._features: FeatureBatch | None = None
+        self._beams: list[tuple[_Hypothesis, ...]] = [()]
+        self._score_cache: dict[tuple[str, int, int], SectionMatchScore | None] = {}
+        self._hypotheses_evaluated = 0
+        self._hypotheses_pruned = 0
+        self._committed_segments: tuple[DecodedSegment, ...] = ()
+        self._finished = False
+
+    @property
+    def frames_processed(self) -> int:
+        """Number of feature frames accepted so far."""
+        return 0 if self._features is None else self._features.frame_count
+
+    @property
+    def committed_path(self) -> DecodedPath:
+        """The path already safe for downstream synthesis."""
+        return _path_from_segments(self._committed_segments)
+
+    def push(self, human: FeatureBatch, *, final: bool = False) -> StreamingDecodeResult:
+        """Append a feature chunk and return its provisional/committed paths."""
+        if self._finished:
+            raise RuntimeError("streaming decoder has already been finalized")
+        if human.frame_count < 1:
+            raise ValueError("cannot append an empty feature chunk")
+
+        previous_count = self.frames_processed
+        self._features = _append_feature_batches(self._features, human)
+        new_count = self.frames_processed
+        self._beams.extend([()] * (new_count - previous_count))
+        assert self._features is not None
+
+        for end_frame in range(previous_count + 1, new_count + 1):
+            self._decode_end_frame(end_frame)
+
+        result = self._make_result(final=final)
+        if final:
+            self._finished = True
+        return result
+
+    def finish(self) -> StreamingDecodeResult:
+        """Finalize the current stream and commit the complete winning path."""
+        if self._finished:
+            raise RuntimeError("streaming decoder has already been finalized")
+        if self.frames_processed < 1:
+            raise ValueError("cannot finalize an empty feature stream")
+        result = self._make_result(final=True)
+        self._finished = True
+        return result
+
+    def reset(self) -> None:
+        """Discard buffered features, hypotheses, and commitment state."""
+        self._features = None
+        self._beams = [()]
+        self._score_cache.clear()
+        self._hypotheses_evaluated = 0
+        self._hypotheses_pruned = 0
+        self._committed_segments = ()
+        self._finished = False
+
+    def _decode_end_frame(self, end_frame: int) -> None:
+        assert self._features is not None
+        candidates: list[_Hypothesis] = []
+        for template in self.decoder._start_templates(self._features, 0):
+            hypothesis = self.decoder._extend_section(
+                None,
+                template,
+                self._features.recognition_features,
+                0,
+                end_frame,
+                0.0,
+                self._score_cache,
+            )
+            self._hypotheses_evaluated += 1
+            if hypothesis is not None:
+                candidates.append(hypothesis)
+        silence = self.decoder._extend_silence(None, self._features, 0, end_frame, 0.0)
+        self._hypotheses_evaluated += 1
+        if silence is not None:
+            candidates.append(silence)
+
+        for start_frame in range(1, end_frame):
+            for previous in self._beams[start_frame]:
+                for template, transition_cost in self.decoder._successors(
+                    previous, self._features, start_frame
+                ):
+                    hypothesis = self.decoder._extend_section(
+                        previous,
+                        template,
+                        self._features.recognition_features,
+                        start_frame,
+                        end_frame,
+                        transition_cost,
+                        self._score_cache,
+                    )
+                    self._hypotheses_evaluated += 1
+                    if hypothesis is not None:
+                        candidates.append(hypothesis)
+                if self.decoder._can_enter_silence(previous):
+                    hypothesis = self.decoder._extend_silence(
+                        previous,
+                        self._features,
+                        start_frame,
+                        end_frame,
+                        self.decoder.config.silence_entry_cost,
+                    )
+                    self._hypotheses_evaluated += 1
+                    if hypothesis is not None:
+                        candidates.append(hypothesis)
+
+        self._beams[end_frame], pruned = self.decoder._prune(candidates)
+        self._hypotheses_pruned += pruned
+
+    def _make_result(self, *, final: bool) -> StreamingDecodeResult:
+        final_hypotheses = self._beams[self.frames_processed]
+        if not final_hypotheses:
+            raise RuntimeError("decoder found no valid path through the audio")
+        paths = tuple(
+            DecodedPath(hypothesis.segments, hypothesis.total_cost)
+            for hypothesis in final_hypotheses
+        )
+        decode_result = DecodeResult(
+            paths[0],
+            paths[1:],
+            self.frames_processed,
+            self._hypotheses_evaluated,
+            len(self._score_cache),
+            self._hypotheses_pruned,
+        )
+
+        if final:
+            safe_segments = paths[0].segments
+        else:
+            shared = _shared_prefix(path.segments for path in paths)
+            cutoff = max(0, self.frames_processed - self.lookahead_frames)
+            safe_segments = tuple(
+                segment for segment in shared if segment.end_frame <= cutoff
+            )
+
+        # A committed segment is immutable to downstream synthesis.  If beam
+        # pruning later changes an already emitted prefix, retain the emitted
+        # prefix and wait for a final result rather than emitting a contradictory
+        # replacement in the middle of a stream.
+        committed_count = len(self._committed_segments)
+        if safe_segments[:committed_count] != self._committed_segments:
+            safe_segments = self._committed_segments
+        newly_committed = safe_segments[committed_count:]
+        self._committed_segments = safe_segments
+        return StreamingDecodeResult(
+            decode_result,
+            newly_committed,
+            _path_from_segments(self._committed_segments),
+            (self._committed_segments[-1].end_frame if self._committed_segments else 0),
+            self.lookahead_frames,
+            final,
+        )
+
+
+def _append_feature_batches(
+    current: FeatureBatch | None, incoming: FeatureBatch
+) -> FeatureBatch:
+    if current is None:
+        return incoming
+    if current.recognition_features.shape[1] != incoming.recognition_features.shape[1]:
+        raise ValueError("feature chunks have incompatible dimensions")
+    return FeatureBatch(
+        np.concatenate((current.frame_times_seconds, incoming.frame_times_seconds)),
+        np.concatenate((current.log_mel, incoming.log_mel)),
+        np.concatenate((current.delta_mel, incoming.delta_mel)),
+        np.concatenate((current.normalized_energy, incoming.normalized_energy)),
+        np.concatenate((current.delta_energy, incoming.delta_energy)),
+        np.concatenate((current.spectral_flux, incoming.spectral_flux)),
+        np.concatenate((current.spectral_flatness, incoming.spectral_flatness)),
+        np.concatenate((current.periodicity, incoming.periodicity)),
+        np.concatenate((current.f0_hz, incoming.f0_hz)),
+        np.concatenate((current.voiced, incoming.voiced)),
+        np.concatenate((current.rms_energy, incoming.rms_energy)),
+    )
+
+
+def _shared_prefix(
+    paths: Iterable[tuple[DecodedSegment, ...]],
+) -> tuple[DecodedSegment, ...]:
+    path_iter = iter(paths)
+    try:
+        prefix = list(next(path_iter))
+    except StopIteration:
+        return ()
+    for path in path_iter:
+        length = 0
+        for left, right in zip(prefix, path, strict=False):
+            if left != right:
+                break
+            length += 1
+        del prefix[length:]
+        if not prefix:
+            break
+    return tuple(prefix)
+
+
+def _path_from_segments(segments: tuple[DecodedSegment, ...]) -> DecodedPath:
+    return DecodedPath(segments, sum(segment.total_cost for segment in segments))

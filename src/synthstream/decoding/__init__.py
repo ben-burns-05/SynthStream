@@ -6,6 +6,8 @@ from synthstream.decoding.decoder import (
     DecoderConfig,
     DecodeResult,
     SegmentalBeamDecoder,
+    StreamingDecodeResult,
+    StreamingSegmentalBeamDecoder,
 )
 
 __all__ = [
@@ -14,4 +16,6 @@ __all__ = [
     "DecodedSegment",
     "DecoderConfig",
     "SegmentalBeamDecoder",
+    "StreamingDecodeResult",
+    "StreamingSegmentalBeamDecoder",
 ]
