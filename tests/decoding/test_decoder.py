@@ -281,3 +281,29 @@ def test_streaming_future_evidence_stays_uncommitted_until_final() -> None:
 def test_streaming_decoder_rejects_invalid_lookahead(lookahead_frames: int) -> None:
     with pytest.raises(ValueError, match="lookahead"):
         StreamingSegmentalBeamDecoder(FutureEvidenceMatcher(), lookahead_frames=lookahead_frames)  # type: ignore[arg-type]
+
+
+def test_streaming_decoder_rejects_invalid_history_limits() -> None:
+    with pytest.raises(ValueError, match="max_start_lookback_frames"):
+        StreamingSegmentalBeamDecoder(
+            FutureEvidenceMatcher(), max_start_lookback_frames=0  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="max_segment_frames"):
+        StreamingSegmentalBeamDecoder(
+            FutureEvidenceMatcher(), max_segment_frames=0  # type: ignore[arg-type]
+        )
+
+
+def test_streaming_feature_storage_grows_without_changing_decisions(tmp_path: Path) -> None:
+    _make_sequence_bank(tmp_path)
+    decoder, extractor = _real_decoder(tmp_path)
+    features = extractor.analyze(_piecewise_unit((220, 330, 440)))
+    stream = decoder.stream()
+    for index in range(features.frame_count):
+        result = stream.push(
+            _slice_features(features, index, index + 1),
+            final=index + 1 == features.frame_count,
+        )
+
+    assert result.provisional_path.segments == decoder.decode(features).best_path.segments
+    assert stream.frames_processed == features.frame_count

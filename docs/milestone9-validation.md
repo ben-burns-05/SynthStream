@@ -18,6 +18,18 @@ Before finalization, a segment is committed only when all surviving hypotheses s
 end lies at least `lookahead_frames` frames behind the newest input. `push(..., final=True)` or
 `finish()` commits the winning path through the end of the stream.
 
+The `SegmentalBeamDecoder.stream()` convenience method is tuned for live work by default:
+candidate starts are limited to 2 per boundary, the active beam to 4 hypotheses, start history
+to 80 frames (800 ms), and section duration to 100 frames (1 second). These bounds prevent
+dynamic-programming work from growing without limit as a microphone session continues. Passing
+`None` for an override restores the corresponding exhaustive offline setting.
+
+The optimized matcher also reuses per-update feature matrices, amortizes callback-buffer
+growth, precomputes silence prefix costs, vectorizes trajectory warping, and computes all
+feature-component means in one reduction. On the development CPU, the 3.4-second Aiko fixture
+takes about 1.3 seconds for bounded streaming decode and about 0.2 seconds for feature
+extraction.
+
 ## Regression coverage
 
 The decoder tests verify that:

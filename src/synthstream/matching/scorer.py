@@ -159,28 +159,30 @@ def uniformly_resample(features: FloatArray, frame_count: int) -> FloatArray:
         raise ValueError("features and target frame count must be non-empty")
     if len(features) == frame_count:
         return features.copy()
-    source_positions = np.linspace(0.0, 1.0, len(features))
-    target_positions = np.linspace(0.0, 1.0, frame_count)
-    result = np.empty((frame_count, features.shape[1]), dtype=np.float32)
-    for column in range(features.shape[1]):
-        result[:, column] = np.interp(
-            target_positions, source_positions, features[:, column]
-        )
-    return result
+    # Equivalent to column-wise ``np.interp`` but vectorized over feature
+    # dimensions.  This is on the hot path for every decoder candidate.
+    positions = np.linspace(0.0, len(features) - 1, frame_count)
+    left = np.floor(positions).astype(np.intp)
+    right = np.minimum(left + 1, len(features) - 1)
+    weight = (positions - left).astype(np.float32)[:, None]
+    return np.asarray(
+        features[left] * (1.0 - weight) + features[right] * weight,
+        dtype=np.float32,
+    )
 
 
 def _component_costs(
     template: FloatArray, candidate: FloatArray, mel_bands: int
 ) -> tuple[float, float, float, float, float, float, float]:
     squared = np.square(template - candidate)
+    means = np.mean(squared, axis=0)
     scalar_start = mel_bands * 2
-    slices: tuple[slice | int, ...] = (
-        slice(0, mel_bands),
-        slice(mel_bands, scalar_start),
-        scalar_start,
-        scalar_start + 1,
-        scalar_start + 2,
-        scalar_start + 3,
-        scalar_start + 4,
+    return (
+        float(np.mean(means[:mel_bands])),
+        float(np.mean(means[mel_bands:scalar_start])),
+        float(means[scalar_start]),
+        float(means[scalar_start + 1]),
+        float(means[scalar_start + 2]),
+        float(means[scalar_start + 3]),
+        float(means[scalar_start + 4]),
     )
-    return tuple(float(np.mean(squared[:, component])) for component in slices)  # type: ignore[return-value]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -119,16 +119,52 @@ class SegmentalBeamDecoder:
             for unit_id, unit_templates in self._units.items()
         }
         self._starts = tuple(unit_templates[0] for unit_templates in self._units.values())
+        self._start_signatures = np.stack(
+            [template.start_signature for template in self._starts]
+        )
         self._next = self._build_within_unit_transitions()
 
-    def stream(self, *, lookahead_frames: int = 3) -> StreamingSegmentalBeamDecoder:
+    def stream(
+        self,
+        *,
+        lookahead_frames: int = 3,
+        candidate_limit: int | None = 2,
+        maximum_hypotheses: int | None = 4,
+        beam_threshold: float | None = 5.0,
+        max_start_lookback_frames: int | None = 80,
+        max_segment_frames: int | None = 100,
+    ) -> StreamingSegmentalBeamDecoder:
         """Create an incremental decoder with fixed-lag commitment.
 
         The returned decoder retains the active beam between feature chunks.  Its
-        provisional path can change as new frames arrive, while committed
-        segments trail the input by ``lookahead_frames`` frames.
+        provisional path can change as new frames arrive, while committed segments
+        trail the input by ``lookahead_frames`` frames.  Streaming defaults use a
+        smaller beam and bounded start history than exhaustive offline decoding;
+        pass ``None`` for those overrides when exact offline search is preferred.
         """
-        return StreamingSegmentalBeamDecoder(self, lookahead_frames=lookahead_frames)
+        config = replace(
+            self.config,
+            start_candidate_limit=(
+                self.config.start_candidate_limit
+                if candidate_limit is None
+                else candidate_limit
+            ),
+            maximum_hypotheses=(
+                self.config.maximum_hypotheses
+                if maximum_hypotheses is None
+                else maximum_hypotheses
+            ),
+            beam_threshold=(
+                self.config.beam_threshold if beam_threshold is None else beam_threshold
+            ),
+        )
+        streaming_decoder = SegmentalBeamDecoder(self.matcher, config)
+        return StreamingSegmentalBeamDecoder(
+            streaming_decoder,
+            lookahead_frames=lookahead_frames,
+            max_start_lookback_frames=max_start_lookback_frames,
+            max_segment_frames=max_segment_frames,
+        )
 
     def decode(self, human: FeatureBatch) -> DecodeResult:
         """Decode a complete feature batch and return traceback-ready paths."""
@@ -136,13 +172,16 @@ class SegmentalBeamDecoder:
             raise ValueError("cannot decode an empty feature batch")
         beams: list[tuple[_Hypothesis, ...]] = [()] * (human.frame_count + 1)
         score_cache: dict[tuple[str, int, int], SectionMatchScore | None] = {}
+        start_cache: dict[int, tuple[SectionTemplate, ...]] = {}
         human_features = human.recognition_features
         hypotheses_evaluated = 0
         hypotheses_pruned = 0
 
         for end_frame in range(1, human.frame_count + 1):
             candidates: list[_Hypothesis] = []
-            for template in self._start_templates(human, 0):
+            for template in self._start_templates(
+                human, 0, start_cache, human_features
+            ):
                 hypothesis = self._extend_section(
                     None,
                     template,
@@ -163,7 +202,7 @@ class SegmentalBeamDecoder:
             for start_frame in range(1, end_frame):
                 for previous in beams[start_frame]:
                     for template, transition_cost in self._successors(
-                        previous, human, start_frame
+                        previous, human, start_frame, start_cache, human_features
                     ):
                         hypothesis = self._extend_section(
                             previous,
@@ -217,26 +256,38 @@ class SegmentalBeamDecoder:
         return transitions
 
     def _start_templates(
-        self, human: FeatureBatch, frame: int
+        self,
+        human: FeatureBatch,
+        frame: int,
+        cache: dict[int, tuple[SectionTemplate, ...]] | None = None,
+        human_features: FloatArray | None = None,
     ) -> tuple[SectionTemplate, ...]:
         limit = self.config.start_candidate_limit
         if limit is None or limit >= len(self._starts):
             return self._starts
-        query = human.recognition_features[frame]
-        distances = tuple(
-            float(np.mean(np.square(template.start_signature - query)))
-            for template in self._starts
-        )
+        if cache is not None and frame in cache:
+            return cache[frame]
+        features = human.recognition_features if human_features is None else human_features
+        query = features[frame]
+        distances = np.mean(np.square(self._start_signatures - query), axis=1)
         order = np.argsort(distances, kind="stable")[:limit]
-        return tuple(self._starts[int(index)] for index in order)
+        result = tuple(self._starts[int(index)] for index in order)
+        if cache is not None:
+            cache[frame] = result
+        return result
 
     def _successors(
-        self, previous: _Hypothesis, human: FeatureBatch, frame: int
+        self,
+        previous: _Hypothesis,
+        human: FeatureBatch,
+        frame: int,
+        cache: dict[int, tuple[SectionTemplate, ...]] | None = None,
+        human_features: FloatArray | None = None,
     ) -> tuple[tuple[SectionTemplate, float], ...]:
         if previous.last_is_silence:
             return tuple(
                 (template, self.config.silence_exit_cost)
-                for template in self._start_templates(human, frame)
+                for template in self._start_templates(human, frame, cache, human_features)
             )
         if previous.last_template is None:
             return ()
@@ -245,7 +296,7 @@ class SegmentalBeamDecoder:
             return tuple((template, 0.0) for template in within_unit)
         return tuple(
             (template, self.config.unit_switch_cost)
-            for template in self._start_templates(human, frame)
+            for template in self._start_templates(human, frame, cache, human_features)
         )
 
     def _can_enter_silence(self, previous: _Hypothesis) -> bool:
@@ -296,6 +347,7 @@ class SegmentalBeamDecoder:
         start_frame: int,
         end_frame: int,
         transition_cost: float,
+        acoustic_cost: float | None = None,
     ) -> _Hypothesis | None:
         duration = end_frame - start_frame
         if duration < self.config.minimum_silence_frames or (
@@ -303,24 +355,25 @@ class SegmentalBeamDecoder:
             and duration > self.config.maximum_silence_frames
         ):
             return None
-        rms = human.rms_energy[start_frame:end_frame]
-        energy_db = 20 * np.log10(np.maximum(rms, 1e-8))
-        excess = np.maximum(
-            0.0,
-            (energy_db - self.config.silence_energy_threshold_db)
-            / self.config.silence_energy_scale_db,
-        )
-        # Silence is a frame-wise state. Accumulate its evidence so that
-        # swallowing additional voiced frames becomes progressively more
-        # expensive; averaging here made an arbitrarily long silence compete
-        # as a single cheap segment against several voicebank sections.
-        acoustic_cost = float(
-            np.sum(
-                np.square(excess)
-                + self.config.silence_periodicity_weight
-                * np.square(human.periodicity[start_frame:end_frame])
+        if acoustic_cost is None:
+            rms = human.rms_energy[start_frame:end_frame]
+            energy_db = 20 * np.log10(np.maximum(rms, 1e-8))
+            excess = np.maximum(
+                0.0,
+                (energy_db - self.config.silence_energy_threshold_db)
+                / self.config.silence_energy_scale_db,
             )
-        )
+            # Silence is a frame-wise state. Accumulate its evidence so that
+            # swallowing additional voiced frames becomes progressively more
+            # expensive; averaging here made an arbitrarily long silence compete
+            # as a single cheap segment against several voicebank sections.
+            acoustic_cost = float(
+                np.sum(
+                    np.square(excess)
+                    + self.config.silence_periodicity_weight
+                    * np.square(human.periodicity[start_frame:end_frame])
+                )
+            )
         segment_cost = acoustic_cost + transition_cost
         segment = DecodedSegment(
             None,
@@ -412,18 +465,30 @@ class StreamingSegmentalBeamDecoder:
         config: DecoderConfig | None = None,
         *,
         lookahead_frames: int = 3,
+        max_start_lookback_frames: int | None = None,
+        max_segment_frames: int | None = None,
     ) -> None:
         if lookahead_frames < 0:
             raise ValueError("lookahead_frames must be non-negative")
+        if max_start_lookback_frames is not None and max_start_lookback_frames < 1:
+            raise ValueError("max_start_lookback_frames must be positive or None")
+        if max_segment_frames is not None and max_segment_frames < 1:
+            raise ValueError("max_segment_frames must be positive or None")
         self.decoder = (
             decoder
             if isinstance(decoder, SegmentalBeamDecoder)
             else SegmentalBeamDecoder(decoder, config)
         )
         self.lookahead_frames = lookahead_frames
+        self.max_start_lookback_frames = max_start_lookback_frames
+        self.max_segment_frames = max_segment_frames
         self._features: FeatureBatch | None = None
+        self._recognition_features: FloatArray | None = None
+        self._feature_accumulator = _FeatureAccumulator()
         self._beams: list[tuple[_Hypothesis, ...]] = [()]
         self._score_cache: dict[tuple[str, int, int], SectionMatchScore | None] = {}
+        self._start_cache: dict[int, tuple[SectionTemplate, ...]] = {}
+        self._silence_prefix = [0.0]
         self._hypotheses_evaluated = 0
         self._hypotheses_pruned = 0
         self._committed_segments: tuple[DecodedSegment, ...] = ()
@@ -447,7 +512,9 @@ class StreamingSegmentalBeamDecoder:
             raise ValueError("cannot append an empty feature chunk")
 
         previous_count = self.frames_processed
-        self._features = _append_feature_batches(self._features, human)
+        self._features = self._feature_accumulator.append(human)
+        self._recognition_features = self._features.recognition_features
+        self._append_silence_costs(human)
         new_count = self.frames_processed
         self._beams.extend([()] * (new_count - previous_count))
         assert self._features is not None
@@ -473,21 +540,49 @@ class StreamingSegmentalBeamDecoder:
     def reset(self) -> None:
         """Discard buffered features, hypotheses, and commitment state."""
         self._features = None
+        self._recognition_features = None
+        self._feature_accumulator.reset()
         self._beams = [()]
         self._score_cache.clear()
+        self._start_cache.clear()
+        self._silence_prefix = [0.0]
         self._hypotheses_evaluated = 0
         self._hypotheses_pruned = 0
         self._committed_segments = ()
         self._finished = False
 
+    def _append_silence_costs(self, chunk: FeatureBatch) -> None:
+        config = self.decoder.config
+        energy_db = 20 * np.log10(np.maximum(chunk.rms_energy, 1e-8))
+        excess = np.maximum(
+            0.0,
+            (energy_db - config.silence_energy_threshold_db)
+            / config.silence_energy_scale_db,
+        )
+        frame_costs = np.square(excess) + config.silence_periodicity_weight * np.square(
+            chunk.periodicity
+        )
+        self._silence_prefix.extend(
+            float(value) for value in np.cumsum(frame_costs, dtype=np.float64)
+            + self._silence_prefix[-1]
+        )
+
+    def _silence_cost(self, start_frame: int, end_frame: int) -> float:
+        return self._silence_prefix[end_frame] - self._silence_prefix[start_frame]
+
     def _decode_end_frame(self, end_frame: int) -> None:
         assert self._features is not None
+        assert self._recognition_features is not None
         candidates: list[_Hypothesis] = []
-        for template in self.decoder._start_templates(self._features, 0):
+        for template in self.decoder._start_templates(
+            self._features, 0, self._start_cache, self._recognition_features
+        ):
+            if self.max_segment_frames is not None and end_frame > self.max_segment_frames:
+                continue
             hypothesis = self.decoder._extend_section(
                 None,
                 template,
-                self._features.recognition_features,
+                self._recognition_features,
                 0,
                 end_frame,
                 0.0,
@@ -496,20 +591,39 @@ class StreamingSegmentalBeamDecoder:
             self._hypotheses_evaluated += 1
             if hypothesis is not None:
                 candidates.append(hypothesis)
-        silence = self.decoder._extend_silence(None, self._features, 0, end_frame, 0.0)
+        silence = self.decoder._extend_silence(
+            None,
+            self._features,
+            0,
+            end_frame,
+            0.0,
+            self._silence_cost(0, end_frame),
+        )
         self._hypotheses_evaluated += 1
         if silence is not None:
             candidates.append(silence)
 
-        for start_frame in range(1, end_frame):
+        start_floor = 1
+        if self.max_start_lookback_frames is not None:
+            start_floor = max(1, end_frame - self.max_start_lookback_frames)
+        for start_frame in range(start_floor, end_frame):
             for previous in self._beams[start_frame]:
                 for template, transition_cost in self.decoder._successors(
-                    previous, self._features, start_frame
+                    previous,
+                    self._features,
+                    start_frame,
+                    self._start_cache,
+                    self._recognition_features,
                 ):
+                    if (
+                        self.max_segment_frames is not None
+                        and end_frame - start_frame > self.max_segment_frames
+                    ):
+                        continue
                     hypothesis = self.decoder._extend_section(
                         previous,
                         template,
-                        self._features.recognition_features,
+                        self._recognition_features,
                         start_frame,
                         end_frame,
                         transition_cost,
@@ -525,6 +639,7 @@ class StreamingSegmentalBeamDecoder:
                         start_frame,
                         end_frame,
                         self.decoder.config.silence_entry_cost,
+                        self._silence_cost(start_frame, end_frame),
                     )
                     self._hypotheses_evaluated += 1
                     if hypothesis is not None:
@@ -578,26 +693,68 @@ class StreamingSegmentalBeamDecoder:
         )
 
 
-def _append_feature_batches(
-    current: FeatureBatch | None, incoming: FeatureBatch
-) -> FeatureBatch:
-    if current is None:
-        return incoming
-    if current.recognition_features.shape[1] != incoming.recognition_features.shape[1]:
-        raise ValueError("feature chunks have incompatible dimensions")
-    return FeatureBatch(
-        np.concatenate((current.frame_times_seconds, incoming.frame_times_seconds)),
-        np.concatenate((current.log_mel, incoming.log_mel)),
-        np.concatenate((current.delta_mel, incoming.delta_mel)),
-        np.concatenate((current.normalized_energy, incoming.normalized_energy)),
-        np.concatenate((current.delta_energy, incoming.delta_energy)),
-        np.concatenate((current.spectral_flux, incoming.spectral_flux)),
-        np.concatenate((current.spectral_flatness, incoming.spectral_flatness)),
-        np.concatenate((current.periodicity, incoming.periodicity)),
-        np.concatenate((current.f0_hz, incoming.f0_hz)),
-        np.concatenate((current.voiced, incoming.voiced)),
-        np.concatenate((current.rms_energy, incoming.rms_energy)),
+class _FeatureAccumulator:
+    """Amortized feature storage for callback-sized streaming updates."""
+
+    _fields = (
+        "frame_times_seconds",
+        "log_mel",
+        "delta_mel",
+        "normalized_energy",
+        "delta_energy",
+        "spectral_flux",
+        "spectral_flatness",
+        "periodicity",
+        "f0_hz",
+        "voiced",
+        "rms_energy",
     )
+
+    def __init__(self) -> None:
+        self._arrays: dict[str, np.ndarray] = {}
+        self._capacity = 0
+        self._count = 0
+
+    def append(self, incoming: FeatureBatch) -> FeatureBatch:
+        if incoming.frame_count < 1:
+            raise ValueError("cannot append an empty feature chunk")
+        if not self._arrays:
+            self._capacity = max(16, incoming.frame_count)
+            self._arrays = {
+                name: np.empty(
+                    (self._capacity, *getattr(incoming, name).shape[1:]),
+                    dtype=getattr(incoming, name).dtype,
+                )
+                for name in self._fields
+            }
+        elif self._count + incoming.frame_count > self._capacity:
+            new_capacity = max(
+                self._capacity * 2,
+                self._count + incoming.frame_count,
+            )
+            self._arrays = {
+                name: _grow_array(array, new_capacity)
+                for name, array in self._arrays.items()
+            }
+            self._capacity = new_capacity
+
+        start = self._count
+        end = start + incoming.frame_count
+        for name in self._fields:
+            self._arrays[name][start:end] = getattr(incoming, name)
+        self._count = end
+        return FeatureBatch(*(self._arrays[name][:end] for name in self._fields))
+
+    def reset(self) -> None:
+        self._arrays.clear()
+        self._capacity = 0
+        self._count = 0
+
+
+def _grow_array(array: np.ndarray, capacity: int) -> np.ndarray:
+    grown = np.empty((capacity, *array.shape[1:]), dtype=array.dtype)
+    grown[: len(array)] = array
+    return grown
 
 
 def _shared_prefix(

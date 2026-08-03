@@ -189,5 +189,15 @@ final = stream.push(last_feature_chunk, final=True)
 Committed segments trail the newest input by the configured fixed lag and must be shared by
 the surviving beam hypotheses. The provisional path remains inspectable for diagnostics and
 can be corrected by future evidence before commitment. `finish()` can be used instead of a
-final push when no additional feature chunk remains. Milestone 10 will connect this decoder
-to live microphone analysis and rendering.
+final push when no additional feature chunk remains. For live use, the convenience
+`decoder.stream()` configuration uses a small candidate beam, an 800 ms maximum start
+history, and a 1-second maximum section duration; these bound work as a stream grows. Pass
+`candidate_limit=None`, `maximum_hypotheses=None`, `beam_threshold=None`,
+`max_start_lookback_frames=None`, or `max_segment_frames=None` to opt back into exhaustive
+search where latency is less important. Milestone 10 will connect this decoder to live
+microphone analysis and rendering.
+
+The optimized generic acoustic path processes the 3.4-second Aiko human-speech fixture in
+approximately 1.3 seconds for decoding plus 0.2 seconds for feature extraction on the
+development CPU. Exact times vary by hardware and bank size; the streaming defaults trade
+some exhaustive alternatives for bounded live latency.

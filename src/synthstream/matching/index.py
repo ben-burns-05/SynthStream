@@ -143,7 +143,6 @@ class SectionFeatureIndex:
             order = order[:limit]
         return tuple(self.templates[int(index)] for index in order)
 
-
 def _duration_model(section_kind: str) -> tuple[float, float, float]:
     if section_kind == "onset":
         return 0.55, 1.8, 1.5
