@@ -230,6 +230,21 @@ bank, pass `use_direct_ipa=False` to explicitly select the lower-accuracy acoust
 `start(background=False)` plus `process_available()` provides a deterministic worker-free mode
 for tests and integrations that own their processing loop.
 
+## Desktop GUI
+
+Milestone 12 adds a basic desktop controller around the same live engine:
+
+```powershell
+synthstream
+```
+
+The window can select a voicebank folder, input device, and output device, then
+start or stop conversion. It reports bank load state, unit count, buffer
+occupancy, committed sections, rendered samples, processing time, and audio or
+worker errors. Device discovery falls back to system defaults on machines
+without enumeratable hardware. The GUI accepts injected backends and device
+providers for deterministic integration tests.
+
 ## OTO overlap and live staging
 
 Milestone 11 honors each new OTO unit's `overlap_ms` instead of hard-splicing

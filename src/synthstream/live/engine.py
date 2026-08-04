@@ -237,7 +237,11 @@ class LiveVoicebankEngine:
             self._process_feature_chunk(pending)
         if self.use_direct_ipa:
             self._process_direct_update(final=True)
-        elif self.streaming_decoder is not None and self.streaming_decoder.frames_processed:
+        elif (
+            self.streaming_decoder is not None
+            and self.streaming_decoder.frames_processed
+            and not self.streaming_decoder.finished
+        ):
             update = self.streaming_decoder.finish()
             self._consume_committed(update.committed_segments)
         self._flush_overlap_output()

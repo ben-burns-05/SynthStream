@@ -1,7 +1,28 @@
+from pathlib import Path
+
+import numpy as np
+import soundfile as sf  # type: ignore[import-untyped]
 from pytestqt.qtbot import QtBot
 
 from synthstream import __version__
 from synthstream.app import MainWindow, create_application
+from synthstream.audio import FakeDuplexAudioBackend
+from synthstream.voicebank import load_voicebank
+
+SAMPLE_RATE = 16_000
+
+
+def _make_bank(root: Path) -> None:
+    time = np.arange(round(SAMPLE_RATE * 0.5), dtype=np.float32) / SAMPLE_RATE
+    audio = np.concatenate(
+        (
+            0.3 * np.sin(2 * np.pi * 220 * time[: round(SAMPLE_RATE * 0.1)]),
+            0.3 * np.sin(2 * np.pi * 330 * time[: round(SAMPLE_RATE * 0.15)]),
+            0.3 * np.sin(2 * np.pi * 440 * time),
+        )
+    ).astype(np.float32)
+    sf.write(root / "a.wav", audio, SAMPLE_RATE)
+    (root / "oto.ini").write_text("a.wav=a,0,200,0,50,20\n", encoding="utf-8")
 
 
 def test_package_has_version() -> None:
@@ -21,3 +42,38 @@ def test_main_window_launches(qtbot: QtBot) -> None:
     assert window.centralWidget().text() == "SynthStream — project setup complete"
     assert window.isVisible()
 
+
+def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot) -> None:
+    _make_bank(tmp_path)
+    backend = FakeDuplexAudioBackend()
+    window = MainWindow(
+        bank=load_voicebank(tmp_path, use_cache=False),
+        backend=backend,
+        use_direct_ipa=False,
+        engine_kwargs={
+            "analysis_chunk_seconds": 0.1,
+            "buffer_duration_seconds": 3.0,
+        },
+    )
+    qtbot.addWidget(window)
+    window.start_conversion()
+    assert window.is_converting
+
+    source_time = np.arange(round(SAMPLE_RATE * 0.5), dtype=np.float32) / SAMPLE_RATE
+    source = (0.3 * np.sin(2 * np.pi * 330 * source_time)).astype(np.float32)
+    backend.feed(source)
+    qtbot.waitUntil(
+        lambda: window.engine is not None and window.engine.statistics.feature_chunks_processed > 0,
+        timeout=10_000,
+    )
+    window.stop_conversion()
+
+    assert not window.is_converting
+    assert window.engine is not None
+    assert window.engine.statistics.committed_segments > 0
+    assert window.engine.statistics.rendered_output_samples > 0
+    queued = window.engine.stream.output_buffer.read(
+        window.engine.stream.output_buffer.available_samples
+    )
+    assert float(np.max(np.abs(queued))) > 0.01
+    assert window.status_label.text() == "Conversion stopped."

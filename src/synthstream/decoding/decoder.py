@@ -500,6 +500,11 @@ class StreamingSegmentalBeamDecoder:
         return 0 if self._features is None else self._features.frame_count
 
     @property
+    def finished(self) -> bool:
+        """Whether ``finish`` or a final push has closed this stream."""
+        return self._finished
+
+    @property
     def committed_path(self) -> DecodedPath:
         """The path already safe for downstream synthesis."""
         return _path_from_segments(self._committed_segments)
