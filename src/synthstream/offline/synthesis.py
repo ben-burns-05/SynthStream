@@ -11,9 +11,9 @@ import numpy.typing as npt
 import soundfile as sf  # type: ignore[import-untyped]
 from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
-from synthstream.offline.recognizer import RecognitionTimeline
-from synthstream.rendering import VoicebankRenderer
-from synthstream.voicebank import Voicebank
+from synthstream.offline.recognizer import RecognitionTimeline, TimelineSegment
+from synthstream.rendering import BufferedOverlapComposer, VoicebankRenderer
+from synthstream.voicebank import Voicebank, VoicebankUnit
 
 AudioSamples = npt.NDArray[np.float32]
 
@@ -27,6 +27,7 @@ class VoicebankSynthesisResult:
     source_timeline: RecognitionTimeline
     voiced_segments: int
     silence_segments: int
+    overlap_segments: int = 0
 
     @property
     def duration_seconds(self) -> float:
@@ -58,17 +59,35 @@ def synthesize_timeline(
     units = {unit.id: unit for unit in bank.units}
     renderer = VoicebankRenderer(output_gain=output_gain)
     total_samples = max(1, round(timeline.input_duration_seconds * output_sample_rate))
-    output = np.zeros(total_samples, dtype=np.float32)
+    # Offline output can keep the whole timeline mutable until the final WAV
+    # is assembled; the live engine uses a short staging window instead.
+    composer = BufferedOverlapComposer(
+        output_sample_rate,
+        staging_seconds=timeline.input_duration_seconds + 1.0,
+    )
     voiced_count = 0
     silence_count = 0
+    overlap_count = 0
+    scheduled_samples = 0
+    previous_unit_id: str | None = None
+    onset_stretch_by_unit: dict[str, float] = {}
 
     for segment in timeline.segments:
         start = min(total_samples, max(0, round(segment.start_seconds * output_sample_rate)))
         end = min(total_samples, max(start, round(segment.end_seconds * output_sample_rate)))
         if end <= start:
             continue
+        if start > scheduled_samples:
+            composer.append(
+                np.zeros(start - scheduled_samples, dtype=np.float32), overlap_samples=0
+            )
+            previous_unit_id = None
+        scheduled_samples = start
         if segment.silence:
             silence_count += 1
+            composer.append(np.zeros(end - start, dtype=np.float32), overlap_samples=0)
+            scheduled_samples = end
+            previous_unit_id = None
             continue
         if segment.unit_id is None or segment.section_index is None:
             raise ValueError("voiced timeline segment is missing unit or section identity")
@@ -80,15 +99,37 @@ def synthesize_timeline(
                 f"timeline references invalid section {segment.section_index} for {unit.id}"
             )
         target_samples = end - start
+        overlap_samples = _overlap_samples(
+            unit,
+            segment,
+            previous_unit_id,
+            onset_stretch_by_unit,
+            output_sample_rate,
+            target_samples,
+        )
+        if segment.section_kind == "onset":
+            onset_stretch_by_unit[unit.id] = max(segment.stretch_ratio, 1e-6)
         rendered = renderer.render_section(
             unit,
             unit.sections[segment.section_index],
-            duration_seconds=target_samples / output_sample_rate,
+            duration_seconds=(target_samples + overlap_samples) / output_sample_rate,
             pitch_ratio=pitch_ratio,
         )
         converted = _resample(rendered.samples, rendered.sample_rate, output_sample_rate)
-        output[start:end] = _fit_length(converted, target_samples)
+        composer.append(
+            _fit_length(converted, target_samples + overlap_samples),
+            overlap_samples=overlap_samples,
+        )
         voiced_count += 1
+        overlap_count += int(overlap_samples > 0)
+        scheduled_samples = end
+        previous_unit_id = unit.id
+
+    if scheduled_samples < total_samples:
+        composer.append(
+            np.zeros(total_samples - scheduled_samples, dtype=np.float32), overlap_samples=0
+        )
+    output = _fit_length(composer.flush(), total_samples)
 
     return VoicebankSynthesisResult(
         output,
@@ -96,7 +137,29 @@ def synthesize_timeline(
         timeline,
         voiced_count,
         silence_count,
+        overlap_count,
     )
+
+
+def _overlap_samples(
+    unit: VoicebankUnit,
+    segment: TimelineSegment,
+    previous_unit_id: str | None,
+    onset_stretch_by_unit: dict[str, float],
+    sample_rate: int,
+    target_samples: int,
+) -> int:
+    """Return warped OTO overlap for a transition into a new alias unit."""
+    unit_id = unit.id
+    if previous_unit_id is None or previous_unit_id == unit_id:
+        return 0
+    overlap_ms = max(0.0, unit.overlap_ms)
+    if overlap_ms <= 0:
+        return 0
+    stretch = onset_stretch_by_unit.get(unit_id, 1.0)
+    if segment.section_kind == "onset":
+        stretch = max(segment.stretch_ratio, 1e-6)
+    return min(target_samples, max(0, round(overlap_ms * sample_rate / 1000.0 * stretch)))
 
 
 def _default_sample_rate(bank: Voicebank) -> int:

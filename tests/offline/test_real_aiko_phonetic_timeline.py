@@ -61,5 +61,6 @@ def test_recorded_english_produces_semantic_real_aiko_alias_timeline(tmp_path: P
     assert synthesized.duration_seconds == pytest.approx(3.4, abs=0.01)
     assert synthesized.voiced_segments > 50
     assert synthesized.silence_segments >= 1
+    assert synthesized.overlap_segments > 10
     assert synthesized.samples.dtype == "float32"
     assert synthesized.samples.max() > 0.05

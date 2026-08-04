@@ -35,7 +35,8 @@ processing time, and worker errors.
 The first live engine uses short input chunks and requires the stream and analysis sample rates
 to match. Voicebank recordings are resampled to the duplex stream rate before output. On the
 development CPU, a 3.4-second Aiko fixture completes direct-IPA recognition and rendering in
-about 2.3 seconds. Overlap-aware rendering remains Milestone 11 work.
+about 2.3 seconds. Milestone 11 adds OTO-aware overlap and a bounded live
+staging tail; see `docs/milestone11-validation.md` for the overlap guarantees.
 
 Fake-duplex tests verify that real Aiko voicebank-derived audio crosses the complete direct-IPA
 production path, that the acoustic fallback and background worker start cleanly, and that

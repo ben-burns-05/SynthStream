@@ -229,3 +229,14 @@ voicebank profile, renders committed OTO sections, and queues output audio. For 
 bank, pass `use_direct_ipa=False` to explicitly select the lower-accuracy acoustic fallback.
 `start(background=False)` plus `process_available()` provides a deterministic worker-free mode
 for tests and integrations that own their processing loop.
+
+## OTO overlap and live staging
+
+Milestone 11 honors each new OTO unit's `overlap_ms` instead of hard-splicing
+sections. The value is warped by that unit's onset stretch ratio and applied as
+a short crossfade between adjacent aliases; sections within one alias and
+silence boundaries are not crossfaded. Offline WAV synthesis keeps the full
+timeline mutable until final assembly, while the live engine holds a 120 ms
+staging tail so recently queued audio can still be mixed retroactively. Audio
+already released to the output buffer remains immutable. See
+[`docs/milestone11-validation.md`](docs/milestone11-validation.md).
