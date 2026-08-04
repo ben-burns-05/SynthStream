@@ -204,7 +204,8 @@ some exhaustive alternatives for bounded live latency.
 
 ## Live microphone conversion
 
-Milestone 10 connects the same pipeline to a duplex microphone/output backend:
+Milestone 10 connects the direct-IPA pipeline for supported English voicebanks to a duplex
+microphone/output backend:
 
 ```python
 from synthstream.audio import SoundDeviceDuplexBackend
@@ -212,7 +213,7 @@ from synthstream.live import LiveVoicebankEngine
 from synthstream.voicebank import load_voicebank
 
 engine = LiveVoicebankEngine(
-    load_voicebank("voicebank/my-bank"),
+    load_voicebank("voicebank/Kikyuune Aiko RockLoud CVVC EN"),
     SoundDeviceDuplexBackend(input_device=None, output_device=None),
 )
 engine.start()  # bounded audio callback plus background processing worker
@@ -223,6 +224,8 @@ finally:
 ```
 
 The callback only moves fixed-size samples through bounded ring buffers. The worker analyzes
-short chunks, feeds the Milestone 9 streaming decoder, renders committed OTO sections, and
-queues output audio. `start(background=False)` plus `process_available()` provides a
-deterministic worker-free mode for tests and integrations that own their processing loop.
+short rolling windows with the wav2vec2 direct-IPA frontend, plans aliases against the detected
+voicebank profile, renders committed OTO sections, and queues output audio. For an unsupported
+bank, pass `use_direct_ipa=False` to explicitly select the lower-accuracy acoustic fallback.
+`start(background=False)` plus `process_available()` provides a deterministic worker-free mode
+for tests and integrations that own their processing loop.

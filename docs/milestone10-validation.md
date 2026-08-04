@@ -1,14 +1,20 @@
 # Milestone 10 validation
 
-Milestone 10 connects microphone input through analysis, incremental decoding, voicebank
-rendering, and output buffering.
+Milestone 10 connects microphone input through direct IPA recognition, inventory-aware alias
+planning, voicebank rendering, and output buffering.
 
 ## Engine pipeline
 
-`LiveVoicebankEngine` owns a `RealtimeAudioStream`, a feature extractor, a section matcher, a
-Milestone 9 streaming decoder, and a `VoicebankRenderer`. The PortAudio callback remains
-bounded and does not run model, matcher, or rendering work. A background worker calls
+`LiveVoicebankEngine` owns a `RealtimeAudioStream`, the rolling wav2vec2 direct-IPA frontend,
+the detected voicebank profile/alias planner, and a `VoicebankRenderer`. The PortAudio callback
+remains bounded and does not run model, matcher, or rendering work. A background worker calls
 `process_available()` and queues only committed sections to the output ring buffer.
+
+Direct mode is the default and requires a supported English CVVC/VCCV/Presamp profile. It keeps
+a 1.2-second recognition window, updates every 0.4 seconds, and commits aliases after a 0.4
+second stability lag. Each committed alias expands into its real OTO-derived onset, transition,
+and sustain sections. `use_direct_ipa=False` explicitly selects the optimized Milestone 9
+acoustic matcher for banks without a direct profile.
 
 The same engine can be driven deterministically without a worker:
 
@@ -26,11 +32,11 @@ processing time, and worker errors.
 
 ## Scope and latency
 
-The first live engine uses short analysis chunks and requires the stream and analysis sample
-rates to match. Voicebank recordings are resampled to the duplex stream rate before output.
-The bounded Milestone 9 streaming defaults provide the live latency guardrails; overlap-aware
-rendering remains Milestone 11 work.
+The first live engine uses short input chunks and requires the stream and analysis sample rates
+to match. Voicebank recordings are resampled to the duplex stream rate before output. On the
+development CPU, a 3.4-second Aiko fixture completes direct-IPA recognition and rendering in
+about 2.3 seconds. Overlap-aware rendering remains Milestone 11 work.
 
-Fake-duplex tests verify that real voicebank-derived audio crosses the complete production
-buffers, that the background worker starts and flushes cleanly, and that invalid rate pairings
-are rejected before the stream starts.
+Fake-duplex tests verify that real Aiko voicebank-derived audio crosses the complete direct-IPA
+production path, that the acoustic fallback and background worker start cleanly, and that
+invalid rate pairings are rejected before the stream starts.

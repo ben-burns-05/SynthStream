@@ -10,6 +10,7 @@ from synthstream.live import LiveVoicebankEngine
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
+PROJECT_ROOT = Path(__file__).parents[2]
 
 
 def _tone(frequency: float, duration: float) -> np.ndarray:
@@ -33,6 +34,7 @@ def test_live_engine_moves_fake_microphone_through_decode_and_render(
         backend,
         analysis_chunk_seconds=0.1,
         buffer_duration_seconds=2.0,
+        use_direct_ipa=False,
     )
 
     source = np.concatenate((_tone(220, 0.15), _tone(330, 0.15), _tone(440, 0.2)))
@@ -64,6 +66,7 @@ def test_live_engine_can_run_background_worker_with_fake_backend(tmp_path: Path)
         backend,
         analysis_chunk_seconds=0.1,
         buffer_duration_seconds=2.0,
+        use_direct_ipa=False,
     )
 
     engine.start(background=True)
@@ -82,4 +85,45 @@ def test_live_engine_requires_matching_stream_and_analysis_rates(tmp_path: Path)
             FakeDuplexAudioBackend(),
             sample_rate=SAMPLE_RATE,
             analysis_config=AnalysisConfig(sample_rate=22_050),
+            use_direct_ipa=False,
         )
+
+
+def test_live_engine_requires_supported_profile_for_direct_mode(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    with pytest.raises(ValueError, match="supported English voicebank profile"):
+        LiveVoicebankEngine(load_voicebank(tmp_path, use_cache=False), FakeDuplexAudioBackend())
+
+
+def test_live_engine_uses_direct_ipa_for_real_aiko_voicebank() -> None:
+    bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    if not bank_path.is_dir():
+        pytest.skip("local Aiko development voicebank is not installed")
+    human, sample_rate = sf.read(
+        PROJECT_ROOT / "tests" / "fixtures" / "human" / "voices_sentence.wav",
+        dtype="float32",
+        always_2d=True,
+    )
+    assert sample_rate == SAMPLE_RATE
+
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine.from_voicebank(
+        bank_path,
+        backend,
+        analysis_chunk_seconds=0.2,
+        direct_update_seconds=0.4,
+        buffer_duration_seconds=5.0,
+    )
+    engine.start(background=False)
+    backend.feed(np.mean(human, axis=1))
+    engine.process_available()
+    engine.flush()
+    queued = engine.stream.output_buffer.read(engine.stream.output_buffer.available_samples)
+    engine.stop()
+
+    statistics = engine.statistics
+    assert statistics.direct_ipa_updates >= 1
+    assert statistics.committed_segments >= 20
+    assert len(queued) > 0
+    assert float(np.max(np.abs(queued))) > 0.01
+    assert statistics.worker_error is None

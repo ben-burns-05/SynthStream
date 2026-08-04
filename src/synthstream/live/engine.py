@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 
@@ -16,6 +16,14 @@ from synthstream.analysis import AnalysisConfig, FeatureExtractor
 from synthstream.audio import DuplexAudioBackend, RealtimeAudioStream
 from synthstream.decoding import DecodedSegment, DecoderConfig, SegmentalBeamDecoder
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
+from synthstream.offline.direct_phonemes import (
+    DetectedPhone,
+    DirectAliasPlanner,
+    DirectIPARecognizer,
+    DirectPlannedAlias,
+)
+from synthstream.offline.recognizer import _phone_aware_section_boundaries
+from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.rendering import VoicebankRenderer
 from synthstream.voicebank import Voicebank, load_voicebank
 
@@ -32,6 +40,7 @@ class LiveEngineStatistics:
     committed_segments: int
     rendered_output_samples: int
     processing_seconds: float
+    direct_ipa_updates: int
     worker_error: str | None
 
 
@@ -59,6 +68,10 @@ class LiveVoicebankEngine:
         lookahead_frames: int = 3,
         pitch_ratio: float = 1.0,
         output_gain: float = 1.0,
+        use_direct_ipa: bool = True,
+        direct_window_seconds: float = 1.2,
+        direct_update_seconds: float = 0.4,
+        direct_commit_lag_seconds: float = 0.4,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
         if config.sample_rate != sample_rate:
@@ -69,14 +82,38 @@ class LiveVoicebankEngine:
             raise ValueError("pitch_ratio must be finite and positive")
         if not math.isfinite(output_gain) or output_gain < 0:
             raise ValueError("output_gain must be finite and non-negative")
+        for value, name in (
+            (direct_window_seconds, "direct_window_seconds"),
+            (direct_update_seconds, "direct_update_seconds"),
+            (direct_commit_lag_seconds, "direct_commit_lag_seconds"),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
 
         self.bank = bank
         self.extractor = FeatureExtractor(config)
-        self.feature_index = SectionFeatureIndex.build(bank, self.extractor)
-        self.decoder = SegmentalBeamDecoder(
-            SectionMatcher(self.feature_index, match_weights), decoder_config
-        )
-        self.streaming_decoder = self.decoder.stream(lookahead_frames=lookahead_frames)
+        self.use_direct_ipa = use_direct_ipa
+        self.feature_index: SectionFeatureIndex | None
+        self.decoder: SegmentalBeamDecoder | None
+        self.streaming_decoder = None
+        self.direct_recognizer: DirectIPARecognizer | None = None
+        self.direct_planner: DirectAliasPlanner | None = None
+        if use_direct_ipa:
+            capability = detect_voicebank_profile(bank)
+            if not capability.supported or capability.profile is None:
+                raise ValueError(
+                    "live direct-IPA mode requires a supported English voicebank profile"
+                )
+            self.direct_recognizer = DirectIPARecognizer()
+            self.direct_planner = DirectAliasPlanner(bank, capability.profile)
+            self.feature_index = None
+            self.decoder = None
+        else:
+            self.feature_index = SectionFeatureIndex.build(bank, self.extractor)
+            self.decoder = SegmentalBeamDecoder(
+                SectionMatcher(self.feature_index, match_weights), decoder_config
+            )
+            self.streaming_decoder = self.decoder.stream(lookahead_frames=lookahead_frames)
         self.renderer = VoicebankRenderer(output_gain=output_gain)
         self.stream = RealtimeAudioStream(
             backend,
@@ -86,8 +123,15 @@ class LiveVoicebankEngine:
         )
         self.pitch_ratio = pitch_ratio
         self.analysis_chunk_samples = max(1, round(analysis_chunk_seconds * sample_rate))
+        self.direct_window_samples = max(1, round(direct_window_seconds * sample_rate))
+        self.direct_update_samples = max(1, round(direct_update_seconds * sample_rate))
+        self.direct_commit_lag_seconds = direct_commit_lag_seconds
         self._units = {unit.id: unit for unit in bank.units}
         self._pending_input = np.empty(0, dtype=np.float32)
+        self._direct_audio = np.empty(0, dtype=np.float32)
+        self._direct_total_samples = 0
+        self._direct_samples_since_update = 0
+        self._direct_emitted_seconds = 0.0
         self._emitted_output_samples = 0
         self._input_blocks_processed = 0
         self._feature_chunks_processed = 0
@@ -95,6 +139,7 @@ class LiveVoicebankEngine:
         self._committed_segments = 0
         self._rendered_output_samples = 0
         self._processing_seconds = 0.0
+        self._direct_ipa_updates = 0
         self._worker_error: str | None = None
         self._statistics_lock = Lock()
         self._worker_stop = Event()
@@ -124,6 +169,7 @@ class LiveVoicebankEngine:
                 self._committed_segments,
                 self._rendered_output_samples,
                 self._processing_seconds,
+                self._direct_ipa_updates,
                 self._worker_error,
             )
 
@@ -131,8 +177,13 @@ class LiveVoicebankEngine:
         """Start the duplex transport and optionally its processing worker."""
         if self.is_running:
             raise RuntimeError("live engine is already running")
-        self.streaming_decoder.reset()
+        if self.streaming_decoder is not None:
+            self.streaming_decoder.reset()
         self._pending_input = np.empty(0, dtype=np.float32)
+        self._direct_audio = np.empty(0, dtype=np.float32)
+        self._direct_total_samples = 0
+        self._direct_samples_since_update = 0
+        self._direct_emitted_seconds = 0.0
         self._emitted_output_samples = 0
         self.stream.input_buffer.clear()
         self.stream.output_buffer.clear()
@@ -176,7 +227,9 @@ class LiveVoicebankEngine:
             pending = self._pending_input
             self._pending_input = np.empty(0, dtype=np.float32)
             self._process_feature_chunk(pending)
-        if self.streaming_decoder.frames_processed:
+        if self.use_direct_ipa:
+            self._process_direct_update(final=True)
+        elif self.streaming_decoder is not None and self.streaming_decoder.frames_processed:
             update = self.streaming_decoder.finish()
             self._consume_committed(update.committed_segments)
 
@@ -201,13 +254,107 @@ class LiveVoicebankEngine:
 
     def _process_feature_chunk(self, samples: AudioSamples) -> None:
         started = time.perf_counter()
-        features = self.extractor.analyze(samples)
-        update = self.streaming_decoder.push(features)
-        self._consume_committed(update.committed_segments)
+        if self.use_direct_ipa:
+            self._direct_audio = np.concatenate((self._direct_audio, samples))
+            self._direct_total_samples += len(samples)
+            if len(self._direct_audio) > self.direct_window_samples:
+                self._direct_audio = self._direct_audio[-self.direct_window_samples :]
+            self._direct_samples_since_update += len(samples)
+            self._process_direct_update()
+            feature_count = 0
+        else:
+            if self.streaming_decoder is None:
+                raise RuntimeError("streaming acoustic decoder is unavailable")
+            features = self.extractor.analyze(samples)
+            update = self.streaming_decoder.push(features)
+            self._consume_committed(update.committed_segments)
+            feature_count = features.frame_count
         with self._statistics_lock:
             self._feature_chunks_processed += 1
-            self._feature_frames_processed += features.frame_count
+            self._feature_frames_processed += feature_count
             self._processing_seconds += time.perf_counter() - started
+
+    def _process_direct_update(self, *, final: bool = False) -> None:
+        if self.direct_recognizer is None or self.direct_planner is None:
+            raise RuntimeError("direct IPA frontend is unavailable")
+        if not final and self._direct_samples_since_update < self.direct_update_samples:
+            return
+        if len(self._direct_audio) < 1:
+            return
+        total_samples = self._direct_total_samples
+        window_start_samples = total_samples - len(self._direct_audio)
+        window = self._direct_audio
+        phones = self.direct_recognizer.recognize(window, self.extractor.config.sample_rate)
+        offset_seconds = window_start_samples / self.extractor.config.sample_rate
+        shifted_phones = tuple(
+            replace(
+                phone,
+                start_seconds=phone.start_seconds + offset_seconds,
+                end_seconds=phone.end_seconds + offset_seconds,
+            )
+            for phone in phones
+        )
+        recognition = self.direct_planner.plan(shifted_phones)
+        window_end_seconds = total_samples / self.extractor.config.sample_rate
+        cutoff = window_end_seconds if final else max(
+            0.0, window_end_seconds - self.direct_commit_lag_seconds
+        )
+        segments = self._direct_segments(recognition.aliases, shifted_phones, cutoff)
+        self._consume_committed(segments)
+        self._direct_samples_since_update = 0
+        with self._statistics_lock:
+            self._direct_ipa_updates += 1
+
+    def _direct_segments(
+        self,
+        aliases: tuple[DirectPlannedAlias, ...],
+        phones: tuple[DetectedPhone, ...],
+        cutoff_seconds: float,
+    ) -> tuple[DecodedSegment, ...]:
+        segments: list[DecodedSegment] = []
+        hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
+        for alias in aliases:
+            if alias.end_seconds > cutoff_seconds + 1e-6:
+                continue
+            if alias.start_seconds < self._direct_emitted_seconds - 1e-6:
+                continue
+            start_frame = max(0, round(alias.start_seconds / hop_seconds))
+            end_frame = max(start_frame + 1, round(alias.end_seconds / hop_seconds))
+            boundaries = _phone_aware_section_boundaries(
+                alias,
+                phones,
+                start_frame,
+                end_frame,
+                hop_seconds,
+            )
+            confidence = max(alias.confidence, 1e-6)
+            section_cost = -math.log(confidence) / len(alias.unit.sections)
+            for section_index, (section_start, section_end) in enumerate(
+                zip(boundaries[:-1], boundaries[1:], strict=True)
+            ):
+                if section_end <= section_start:
+                    continue
+                nominal_frames = max(
+                    1,
+                    round(alias.unit.sections[section_index].duration_seconds / hop_seconds),
+                )
+                segments.append(
+                    DecodedSegment(
+                        alias.unit.id,
+                        alias.alias,
+                        section_index,
+                        alias.unit.sections[section_index].kind,
+                        section_start,
+                        section_end,
+                        (section_end - section_start) / nominal_frames,
+                        section_cost,
+                        0.0,
+                        0.0,
+                        section_cost,
+                    )
+                )
+            self._direct_emitted_seconds = alias.end_seconds
+        return tuple(segments)
 
     def _consume_committed(self, segments: tuple[DecodedSegment, ...]) -> None:
         for segment in segments:
