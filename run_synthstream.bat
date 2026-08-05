@@ -22,7 +22,7 @@ if not defined PYTHON_EXE (
 )
 
 set "PYTHONPATH=%PROJECT_ROOT%src;%PYTHONPATH%"
-%PYTHON_EXE% %PYTHON_ARGS% -m synthstream.app %*
+%PYTHON_EXE% %PYTHON_ARGS% -m synthstream %*
 if errorlevel 1 (
     echo.
     echo SynthStream could not start. Check that Python and project dependencies are installed.
