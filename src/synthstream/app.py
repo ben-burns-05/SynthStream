@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from threading import Event, Thread
 from typing import Any, cast
 
 import sounddevice as sd  # type: ignore[import-untyped]
@@ -71,6 +72,9 @@ class MainWindow(QMainWindow):
         self._use_direct_ipa = use_direct_ipa
         self._engine_kwargs: dict[str, Any] = dict(engine_kwargs or {})
         self._engine: LiveVoicebankEngine | None = None
+        self._startup_thread: Thread | None = None
+        self._startup_cancel = Event()
+        self._startup_error: str | None = None
         self._timer = QTimer(self)
         self._timer.setInterval(100)
         self._timer.timeout.connect(self.refresh_status)
@@ -149,9 +153,14 @@ class MainWindow(QMainWindow):
         """Whether the live transport is currently running."""
         return self._engine is not None and self._engine.is_running
 
+    @property
+    def is_starting(self) -> bool:
+        """Whether direct-IPA assets are still being prepared."""
+        return self._startup_thread is not None
+
     def set_voicebank(self, bank: Voicebank, root: str | Path | None = None) -> None:
         """Install an already loaded bank, primarily useful for integrations/tests."""
-        if self.is_converting:
+        if self.is_converting or self.is_starting:
             self.stop_conversion()
         self._bank = bank
         self._engine = None
@@ -179,7 +188,7 @@ class MainWindow(QMainWindow):
 
     def start_conversion(self) -> None:
         """Start the same live engine used by the programmatic API."""
-        if self.is_converting:
+        if self.is_converting or self.is_starting:
             return
         if self._bank is None:
             self.status_label.setText("Select a voicebank before starting.")
@@ -199,18 +208,40 @@ class MainWindow(QMainWindow):
                 use_direct_ipa=self._use_direct_ipa,
                 **self._engine_kwargs,
             )
-            self._engine.start(background=True)
         except Exception as error:
             self._engine = None
             self.status_label.setText(f"Unable to start: {error}")
             return
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.status_label.setText("Converting live microphone audio.")
+        self._startup_error = None
+        self._startup_cancel.clear()
+        if self._use_direct_ipa:
+            self.status_label.setText(
+                "Loading direct IPA model; first use may download approximately 1.3 GB."
+            )
+            self._startup_thread = Thread(
+                target=self._prepare_engine,
+                args=(self._engine,),
+                name="synthstream-gui-startup",
+                daemon=True,
+            )
+            self._startup_thread.start()
+        else:
+            self._activate_engine()
         self._timer.start()
 
     def stop_conversion(self) -> None:
         """Flush committed audio and stop the selected transport cleanly."""
+        if self.is_starting:
+            self._startup_cancel.set()
+            self._startup_thread = None
+            self._engine = None
+            self._timer.stop()
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.status_label.setText("Conversion stopped.")
+            return
         engine = self._engine
         if engine is not None and engine.is_running:
             engine.stop(flush=True)
@@ -222,6 +253,26 @@ class MainWindow(QMainWindow):
 
     def refresh_status(self) -> None:
         """Refresh diagnostics from the live engine and transport buffers."""
+        startup_thread = self._startup_thread
+        if startup_thread is not None:
+            if startup_thread.is_alive():
+                self.status_label.setText(
+                    "Loading direct IPA model; first use may download approximately 1.3 GB."
+                )
+                return
+            self._startup_thread = None
+            if self._startup_cancel.is_set():
+                return
+            if self._startup_error is not None:
+                self._engine = None
+                self._timer.stop()
+                self.start_button.setEnabled(True)
+                self.stop_button.setEnabled(False)
+                self.status_label.setText(
+                    f"Unable to prepare direct IPA model: {self._startup_error}"
+                )
+                return
+            self._activate_engine()
         engine = self._engine
         if engine is None:
             return
@@ -250,9 +301,33 @@ class MainWindow(QMainWindow):
             self.errors_label.setText(f"Audio errors: {error_text}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self.is_converting:
+        if self.is_converting or self.is_starting:
             self.stop_conversion()
         event.accept()
+
+    def _prepare_engine(self, engine: LiveVoicebankEngine | None) -> None:
+        if engine is None:
+            self._startup_error = "engine was not constructed"
+            return
+        try:
+            engine.prepare_direct_ipa()
+        except Exception as error:  # pragma: no cover - model/network dependent
+            self._startup_error = str(error)
+
+    def _activate_engine(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        try:
+            engine.start(background=True)
+        except Exception as error:
+            self._engine = None
+            self._timer.stop()
+            self.start_button.setEnabled(True)
+            self.stop_button.setEnabled(False)
+            self.status_label.setText(f"Unable to start: {error}")
+            return
+        self.status_label.setText("Converting live microphone audio.")
 
     def _choose_voicebank(self) -> None:
         root = QFileDialog.getExistingDirectory(self, "Select voicebank folder")

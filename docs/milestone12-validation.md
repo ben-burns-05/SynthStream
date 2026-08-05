@@ -17,7 +17,9 @@ Milestone 12 adds a usable desktop control surface around
 The GUI uses the same `LiveVoicebankEngine` as programmatic integrations. The
 engine remains responsible for audio callbacks, analysis, decoding, rendering,
 and overlap staging; a Qt timer only refreshes diagnostics, so model work does
-not run on the GUI thread.
+not run on the GUI thread. Direct-IPA model assets are prepared on a startup
+worker before the transport opens, preventing cold-start model download time
+from being reported as a stream of output underflows.
 
 `MainWindow` accepts an already loaded `Voicebank`, a fake backend, a backend
 factory, and a device provider. These injection points make deterministic GUI

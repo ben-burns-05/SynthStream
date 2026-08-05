@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import soundfile as sf  # type: ignore[import-untyped]
@@ -7,6 +8,9 @@ from pytestqt.qtbot import QtBot
 from synthstream import __version__
 from synthstream.app import MainWindow, create_application
 from synthstream.audio import FakeDuplexAudioBackend
+from synthstream.live import LiveVoicebankEngine
+from synthstream.live import engine as live_engine_module
+from synthstream.offline.voicebank_phonemizer import VoicebankCapability, VoicebankProfile
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -63,6 +67,48 @@ def test_gui_device_discovery_failure_keeps_system_defaults(qtbot: QtBot) -> Non
     assert window.input_device_combo.currentText() == "System default"
     assert window.output_device_combo.currentText() == "System default"
     assert "device query failed" in window.errors_label.text()
+
+
+def test_gui_waits_for_direct_model_before_starting_transport(
+    tmp_path: Path,
+    qtbot: QtBot,
+    monkeypatch,
+) -> None:
+    _make_bank(tmp_path)
+    capability = VoicebankCapability(
+        VoicebankProfile("test", "english-cvvc", {}, frozenset()),
+        0.95,
+        1.0,
+        (),
+        "test profile",
+    )
+    monkeypatch.setattr(live_engine_module, "detect_voicebank_profile", lambda bank: capability)
+    preparation_started = Event()
+    release_preparation = Event()
+
+    def slow_prepare(self: LiveVoicebankEngine) -> None:
+        preparation_started.set()
+        release_preparation.wait(2.0)
+
+    monkeypatch.setattr(LiveVoicebankEngine, "prepare_direct_ipa", slow_prepare)
+    backend = FakeDuplexAudioBackend()
+    window = MainWindow(
+        bank=load_voicebank(tmp_path, use_cache=False),
+        backend=backend,
+        engine_kwargs={"buffer_duration_seconds": 2.0},
+    )
+    qtbot.addWidget(window)
+
+    window.start_conversion()
+    qtbot.waitUntil(preparation_started.is_set, timeout=2_000)
+    assert window.is_starting
+    assert not window.is_converting
+    assert "Loading direct IPA model" in window.status_label.text()
+
+    release_preparation.set()
+    qtbot.waitUntil(lambda: window.is_converting, timeout=2_000)
+    window.stop_conversion()
+    assert not window.is_converting
 
 
 def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot) -> None:

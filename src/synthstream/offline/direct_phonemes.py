@@ -58,19 +58,20 @@ class DirectIPARecognizer:
         self._model: Any | None = None
         self._labels: dict[int, str] | None = None
 
+    def warmup(self) -> None:
+        """Load model and vocabulary assets before audio capture begins."""
+        self._ensure_model()
+
     def recognize(self, samples: FloatArray, sample_rate: int) -> tuple[DetectedPhone, ...]:
         if sample_rate != 16_000:
             raise ValueError("direct IPA recognizer requires 16 kHz audio")
-        if self._model is None:
-            self._model, vocab_path = _load_model_assets()
-            vocabulary = json.loads(Path(vocab_path).read_text(encoding="utf-8"))
-            self._labels = {int(index): symbol for symbol, index in vocabulary.items()}
+        model, labels = self._ensure_model()
 
         waveform = torch.from_numpy(
             np.asarray(samples, dtype=np.float32).copy()
         ).unsqueeze(0)
         with torch.inference_mode():
-            logits = self._model(waveform).logits[0]
+            logits = model(waveform).logits[0]
         probabilities = torch.softmax(logits, dim=-1)
         ids = torch.argmax(probabilities, dim=-1)
         frame_seconds = len(samples) / sample_rate / len(ids)
@@ -79,8 +80,7 @@ class DirectIPARecognizer:
         for frame, token_tensor in enumerate(ids):
             token = int(token_tensor)
             if token != previous and token != 0:
-                assert self._labels is not None
-                spikes.append((self._labels[token], frame, float(probabilities[frame, token])))
+                spikes.append((labels[token], frame, float(probabilities[frame, token])))
             previous = token
         phones: list[DetectedPhone] = []
         for index, (ipa, frame, confidence) in enumerate(spikes):
@@ -99,6 +99,14 @@ class DirectIPARecognizer:
                 )
             )
         return tuple(phones)
+
+    def _ensure_model(self) -> tuple[Any, dict[int, str]]:
+        if self._model is None:
+            self._model, vocab_path = _load_model_assets()
+            vocabulary = json.loads(Path(vocab_path).read_text(encoding="utf-8"))
+            self._labels = {int(index): symbol for symbol, index in vocabulary.items()}
+        assert self._labels is not None
+        return self._model, self._labels
 
 
 def _load_model_assets() -> tuple[Any, str]:

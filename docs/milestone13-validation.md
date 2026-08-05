@@ -24,6 +24,6 @@ mock conversion path for the production matcher or renderer.
 
 ## Verification result
 
-The complete suite passes with 116 tests and 88% branch-aware coverage on the
+The complete suite passes with 118 tests and 88% branch-aware coverage on the
 development environment. Ruff and mypy also pass. Tests that require optional
 development voicebanks skip cleanly when those local banks are unavailable.

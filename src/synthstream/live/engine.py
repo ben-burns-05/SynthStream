@@ -163,6 +163,12 @@ class LiveVoicebankEngine:
     def is_running(self) -> bool:
         return self.stream.is_running
 
+    def prepare_direct_ipa(self) -> None:
+        """Load direct-IPA assets before starting the audio transport."""
+        if not self.use_direct_ipa or self.direct_recognizer is None:
+            return
+        self.direct_recognizer.warmup()
+
     @property
     def statistics(self) -> LiveEngineStatistics:
         with self._statistics_lock:

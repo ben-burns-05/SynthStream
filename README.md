@@ -243,7 +243,10 @@ start or stop conversion. It reports bank load state, unit count, buffer
 occupancy, committed sections, rendered samples, processing time, and audio or
 worker errors. Device discovery falls back to system defaults on machines
 without enumeratable hardware. The GUI accepts injected backends and device
-providers for deterministic integration tests.
+providers for deterministic integration tests. For supported direct-IPA banks,
+the first Start performs model preparation before opening the audio transport;
+the GUI reports this explicitly instead of accumulating output underflows while
+the model downloads or initializes.
 
 ## OTO overlap and live staging
 
