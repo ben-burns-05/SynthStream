@@ -58,6 +58,31 @@ def test_live_engine_moves_fake_microphone_through_decode_and_render(
     assert statistics.worker_error is None
 
 
+def test_live_engine_flush_is_idempotent_after_final_decoder_commit(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine(
+        load_voicebank(tmp_path, use_cache=False),
+        backend,
+        analysis_chunk_seconds=0.1,
+        buffer_duration_seconds=2.0,
+        use_direct_ipa=False,
+    )
+
+    engine.start(background=False)
+    backend.feed(_tone(220, 0.3))
+    engine.process_available()
+    engine.flush()
+    first_statistics = engine.statistics
+    engine.flush()
+    second_statistics = engine.statistics
+    engine.stop()
+
+    assert second_statistics.committed_segments == first_statistics.committed_segments
+    assert second_statistics.rendered_output_samples == first_statistics.rendered_output_samples
+    assert second_statistics.worker_error is None
+
+
 def test_live_engine_can_run_background_worker_with_fake_backend(tmp_path: Path) -> None:
     _make_bank(tmp_path)
     backend = FakeDuplexAudioBackend()

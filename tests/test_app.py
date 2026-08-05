@@ -43,6 +43,28 @@ def test_main_window_launches(qtbot: QtBot) -> None:
     assert window.isVisible()
 
 
+def test_gui_requires_a_voicebank_before_starting(qtbot: QtBot) -> None:
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.start_conversion()
+
+    assert not window.is_converting
+    assert window.status_label.text() == "Select a voicebank before starting."
+
+
+def test_gui_device_discovery_failure_keeps_system_defaults(qtbot: QtBot) -> None:
+    def broken_provider() -> tuple[tuple[tuple[str, int | str | None], ...], ...]:
+        raise RuntimeError("device query failed")
+
+    window = MainWindow(device_provider=broken_provider)
+    qtbot.addWidget(window)
+
+    assert window.input_device_combo.currentText() == "System default"
+    assert window.output_device_combo.currentText() == "System default"
+    assert "device query failed" in window.errors_label.text()
+
+
 def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot) -> None:
     _make_bank(tmp_path)
     backend = FakeDuplexAudioBackend()
@@ -77,3 +99,6 @@ def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot)
     )
     assert float(np.max(np.abs(queued))) > 0.01
     assert window.status_label.text() == "Conversion stopped."
+    window.refresh_status()
+    assert "Committed sections:" in window.committed_label.text()
+    assert window.errors_label.text().startswith("Audio errors:")

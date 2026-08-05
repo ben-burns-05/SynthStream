@@ -255,3 +255,17 @@ timeline mutable until final assembly, while the live engine holds a 120 ms
 staging tail so recently queued audio can still be mixed retroactively. Audio
 already released to the output buffer remains immutable. See
 [`docs/milestone11-validation.md`](docs/milestone11-validation.md).
+
+## Full application test coverage
+
+Milestone 13 covers the complete path with automated tests: matching and
+decoding, offline human-WAV timelines and voicebank WAV synthesis, fake-device
+live conversion, real Aiko-bank conversion when installed, and GUI
+end-to-end start/stop/status behavior. Run the full suite with:
+
+```powershell
+python -m pytest -q
+```
+
+See [`docs/milestone13-validation.md`](docs/milestone13-validation.md) for the
+coverage matrix and current verification result.
