@@ -118,10 +118,10 @@ class MainWindow(QMainWindow):
 
         self.status_label = QLabel("Select a voicebank to begin.")
         self.units_label = QLabel("Voicebank units: —")
-        self.input_level_label = QLabel("Input buffer: 0 samples")
+        self.input_level_label = QLabel("Input level: —; buffer 0 samples")
         self.output_level_label = QLabel("Output buffer: 0 samples")
         self.committed_label = QLabel("Committed sections: 0")
-        self.latency_label = QLabel("Estimated processing time: 0.000 s")
+        self.latency_label = QLabel("Total processing CPU time: 0.000 s")
         diagnostics = QFormLayout()
         diagnostics.addRow("Status", self.status_label)
         diagnostics.addRow("Voicebank", self.units_label)
@@ -279,24 +279,48 @@ class MainWindow(QMainWindow):
         statistics = engine.statistics
         stream_stats = engine.stream.statistics
         self.input_level_label.setText(
-            f"Input buffer: {engine.stream.input_buffer.available_samples} samples"
+            f"Input: peak {statistics.input_peak:.3f}, RMS {statistics.input_rms:.3f}; "
+            f"buffer {engine.stream.input_buffer.available_samples} samples"
         )
         self.output_level_label.setText(
             f"Output buffer: {engine.stream.output_buffer.available_samples} samples"
         )
         self.committed_label.setText(
             f"Committed sections: {statistics.committed_segments} · rendered: "
-            f"{statistics.rendered_output_samples} samples"
+            f"{statistics.rendered_output_samples} samples · IPA updates: "
+            f"{statistics.direct_ipa_updates}, phones: {statistics.detected_phones}, "
+            f"aliases: {statistics.planned_aliases}"
         )
         self.latency_label.setText(
-            f"Estimated processing time: {statistics.processing_seconds:.3f} s"
+            f"Total processing CPU time: {statistics.processing_seconds:.3f} s"
         )
         error_text = statistics.worker_error
         if error_text is None:
-            error_count = (
-                stream_stats.output_underflow_samples + stream_stats.input_overflow_samples
+            self.errors_label.setText(
+                "Audio underflows: "
+                f"{stream_stats.output_underflow_samples}; input overflows: "
+                f"{stream_stats.input_overflow_samples}"
             )
-            self.errors_label.setText(f"Audio errors: {error_count} samples")
+            if (
+                self.is_converting
+                and self._use_direct_ipa
+                and statistics.feature_chunks_processed >= 4
+                and statistics.direct_ipa_updates == 0
+            ):
+                self.status_label.setText(
+                    "Waiting for direct IPA recognition; check the selected microphone "
+                    "if this persists."
+                )
+            elif (
+                self.is_converting
+                and self._use_direct_ipa
+                and statistics.direct_ipa_updates >= 2
+                and statistics.detected_phones == 0
+            ):
+                self.status_label.setText(
+                    "No speech phones detected; check microphone permission, mute, "
+                    "and input device."
+                )
         else:
             self.errors_label.setText(f"Audio errors: {error_text}")
 

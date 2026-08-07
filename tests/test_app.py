@@ -147,7 +147,7 @@ def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot)
     assert window.status_label.text() == "Conversion stopped."
     window.refresh_status()
     assert "Committed sections:" in window.committed_label.text()
-    assert window.errors_label.text().startswith("Audio errors:")
+    assert window.errors_label.text().startswith("Audio underflows:")
 
 
 def test_gui_direct_aiko_voicebank_end_to_end(qtbot: QtBot) -> None:

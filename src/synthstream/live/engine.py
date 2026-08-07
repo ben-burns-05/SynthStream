@@ -41,6 +41,10 @@ class LiveEngineStatistics:
     rendered_output_samples: int
     processing_seconds: float
     direct_ipa_updates: int
+    detected_phones: int
+    planned_aliases: int
+    input_peak: float
+    input_rms: float
     worker_error: str | None
 
 
@@ -144,6 +148,10 @@ class LiveVoicebankEngine:
         self._rendered_output_samples = 0
         self._processing_seconds = 0.0
         self._direct_ipa_updates = 0
+        self._detected_phones = 0
+        self._planned_aliases = 0
+        self._input_peak = 0.0
+        self._input_rms = 0.0
         self._worker_error: str | None = None
         self._statistics_lock = Lock()
         self._worker_stop = Event()
@@ -180,6 +188,10 @@ class LiveVoicebankEngine:
                 self._rendered_output_samples,
                 self._processing_seconds,
                 self._direct_ipa_updates,
+                self._detected_phones,
+                self._planned_aliases,
+                self._input_peak,
+                self._input_rms,
                 self._worker_error,
             )
 
@@ -273,6 +285,12 @@ class LiveVoicebankEngine:
 
     def _process_feature_chunk(self, samples: AudioSamples) -> None:
         started = time.perf_counter()
+        self._input_peak = float(np.max(np.abs(samples))) if len(samples) else 0.0
+        self._input_rms = (
+            float(np.sqrt(np.mean(np.square(samples, dtype=np.float64))))
+            if len(samples)
+            else 0.0
+        )
         if self.use_direct_ipa:
             self._direct_audio = np.concatenate((self._direct_audio, samples))
             self._direct_total_samples += len(samples)
@@ -304,6 +322,7 @@ class LiveVoicebankEngine:
         window_start_samples = total_samples - len(self._direct_audio)
         window = self._direct_audio
         phones = self.direct_recognizer.recognize(window, self.extractor.config.sample_rate)
+        self._detected_phones += len(phones)
         offset_seconds = window_start_samples / self.extractor.config.sample_rate
         shifted_phones = tuple(
             replace(
@@ -314,6 +333,7 @@ class LiveVoicebankEngine:
             for phone in phones
         )
         recognition = self.direct_planner.plan(shifted_phones)
+        self._planned_aliases += len(recognition.aliases)
         window_end_seconds = total_samples / self.extractor.config.sample_rate
         cutoff = window_end_seconds if final else max(
             0.0, window_end_seconds - self.direct_commit_lag_seconds
