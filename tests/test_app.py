@@ -148,3 +148,49 @@ def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot)
     window.refresh_status()
     assert "Committed sections:" in window.committed_label.text()
     assert window.errors_label.text().startswith("Audio errors:")
+
+
+def test_gui_direct_aiko_voicebank_end_to_end(qtbot: QtBot) -> None:
+    project_root = Path(__file__).parents[1]
+    bank_path = project_root / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    human_path = project_root / "tests" / "fixtures" / "human" / "voices_sentence.wav"
+    if not bank_path.is_dir():
+        import pytest
+
+        pytest.skip("local Aiko development voicebank is not installed")
+
+    human, sample_rate = sf.read(human_path, dtype="float32", always_2d=True)
+    assert sample_rate == SAMPLE_RATE
+    backend = FakeDuplexAudioBackend()
+    window = MainWindow(
+        bank=load_voicebank(bank_path),
+        backend=backend,
+        engine_kwargs={
+            "analysis_chunk_seconds": 0.2,
+            "direct_update_seconds": 0.4,
+            "buffer_duration_seconds": 5.0,
+        },
+    )
+    qtbot.addWidget(window)
+
+    window.start_conversion()
+    qtbot.waitUntil(lambda: window.is_converting, timeout=60_000)
+    assert "Converting" in window.status_label.text()
+    backend.feed(np.mean(human, axis=1))
+    qtbot.waitUntil(
+        lambda: window.engine is not None
+        and window.engine.statistics.direct_ipa_updates >= 1,
+        timeout=60_000,
+    )
+    window.stop_conversion()
+
+    assert window.engine is not None
+    statistics = window.engine.statistics
+    assert statistics.committed_segments >= 20
+    assert statistics.rendered_output_samples > 0
+    queued = window.engine.stream.output_buffer.read(
+        window.engine.stream.output_buffer.available_samples
+    )
+    assert len(queued) > 0
+    assert float(np.max(np.abs(queued))) > 0.01
+    assert statistics.worker_error is None

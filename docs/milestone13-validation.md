@@ -16,7 +16,8 @@ pipeline.
   conversion, background workers, and idempotent finalization;
 - GUI tests cover application launch, voicebank gating, device-discovery
   fallback, real engine start/stop, matching, rendering, output transport, and
-  status updates.
+  status updates. When the local Aiko bank is installed, a second GUI test
+  exercises the default direct-IPA path with the real human fixture and model.
 
 The GUI end-to-end test deliberately uses the same `LiveVoicebankEngine` and
 `FakeDuplexAudioBackend` as non-GUI integrations, so it does not substitute a
@@ -24,6 +25,6 @@ mock conversion path for the production matcher or renderer.
 
 ## Verification result
 
-The complete suite passes with 118 tests and 88% branch-aware coverage on the
+The complete suite passes with 119 tests and 88% branch-aware coverage on the
 development environment. Ruff and mypy also pass. Tests that require optional
 development voicebanks skip cleanly when those local banks are unavailable.
