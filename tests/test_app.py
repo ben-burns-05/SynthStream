@@ -182,15 +182,22 @@ def test_gui_direct_aiko_voicebank_end_to_end(qtbot: QtBot) -> None:
         and window.engine.statistics.direct_ipa_updates >= 1,
         timeout=60_000,
     )
+    qtbot.waitUntil(
+        lambda: window.engine is not None
+        and window.engine.statistics.rendered_output_samples > 0,
+        timeout=60_000,
+    )
+    captured_chunks = []
+    for _ in range(round(2.0 * SAMPLE_RATE / 320)):
+        captured_chunks.append(backend.feed(np.zeros(320, dtype=np.float32)))
+        qtbot.wait(20)
+    captured = np.concatenate(captured_chunks)
     window.stop_conversion()
 
     assert window.engine is not None
     statistics = window.engine.statistics
     assert statistics.committed_segments >= 20
     assert statistics.rendered_output_samples > 0
-    queued = window.engine.stream.output_buffer.read(
-        window.engine.stream.output_buffer.available_samples
-    )
-    assert len(queued) > 0
-    assert float(np.max(np.abs(queued))) > 0.01
+    assert len(captured) > 0
+    assert float(np.max(np.abs(captured))) > 0.01
     assert statistics.worker_error is None
