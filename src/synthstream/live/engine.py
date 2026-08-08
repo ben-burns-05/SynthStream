@@ -77,7 +77,8 @@ class LiveVoicebankEngine:
         direct_update_seconds: float = 0.4,
         direct_commit_lag_seconds: float = 0.4,
         direct_endpoint_seconds: float = 0.24,
-        direct_silence_rms_threshold: float = 0.002,
+        direct_silence_rms_threshold: float = 0.00005,
+        direct_utterance_seconds: float = 6.0,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
         if config.sample_rate != sample_rate:
@@ -94,6 +95,7 @@ class LiveVoicebankEngine:
             (direct_commit_lag_seconds, "direct_commit_lag_seconds"),
             (direct_endpoint_seconds, "direct_endpoint_seconds"),
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
+            (direct_utterance_seconds, "direct_utterance_seconds"),
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -112,7 +114,7 @@ class LiveVoicebankEngine:
                 raise ValueError(
                     "live direct-IPA mode requires a supported English voicebank profile"
                 )
-            self.direct_recognizer = DirectIPARecognizer()
+            self.direct_recognizer = DirectIPARecognizer(normalize_input=True)
             self.direct_planner = DirectAliasPlanner(bank, capability.profile)
             self.feature_index = None
             self.decoder = None
@@ -136,6 +138,7 @@ class LiveVoicebankEngine:
         self.direct_commit_lag_seconds = direct_commit_lag_seconds
         self.direct_endpoint_samples = max(1, round(direct_endpoint_seconds * sample_rate))
         self.direct_silence_rms_threshold = direct_silence_rms_threshold
+        self.direct_utterance_samples = max(1, round(direct_utterance_seconds * sample_rate))
         self._units = {unit.id: unit for unit in bank.units}
         self._overlap_composer = BufferedOverlapComposer(sample_rate, staging_seconds=0.12)
         self._scheduled_output_samples = 0
@@ -146,6 +149,8 @@ class LiveVoicebankEngine:
         self._direct_total_samples = 0
         self._direct_samples_since_update = 0
         self._direct_emitted_seconds = 0.0
+        self._direct_utterance_audio = np.empty(0, dtype=np.float32)
+        self._direct_utterance_start_samples = 0
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
         self._emitted_output_samples = 0
@@ -214,6 +219,8 @@ class LiveVoicebankEngine:
         self._direct_total_samples = 0
         self._direct_samples_since_update = 0
         self._direct_emitted_seconds = 0.0
+        self._direct_utterance_audio = np.empty(0, dtype=np.float32)
+        self._direct_utterance_start_samples = 0
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
         self._emitted_output_samples = 0
@@ -307,16 +314,27 @@ class LiveVoicebankEngine:
             if len(self._direct_audio) > self.direct_window_samples:
                 self._direct_audio = self._direct_audio[-self.direct_window_samples :]
             self._direct_samples_since_update += len(samples)
-            self._process_direct_update()
+            endpoint_reached = False
             if self._input_rms >= self.direct_silence_rms_threshold:
+                if not self._direct_speech_seen:
+                    self._direct_utterance_audio = np.empty(0, dtype=np.float32)
+                    self._direct_utterance_start_samples = (
+                        self._direct_total_samples - len(samples)
+                    )
+                self._append_direct_utterance(samples)
                 self._direct_speech_seen = True
                 self._direct_quiet_samples = 0
             elif self._direct_speech_seen:
+                self._append_direct_utterance(samples)
                 self._direct_quiet_samples += len(samples)
                 if self._direct_quiet_samples >= self.direct_endpoint_samples:
                     self._process_direct_update(final=True)
+                    self._direct_utterance_audio = np.empty(0, dtype=np.float32)
                     self._direct_quiet_samples = 0
                     self._direct_speech_seen = False
+                    endpoint_reached = True
+            if not endpoint_reached:
+                self._process_direct_update()
             feature_count = 0
         else:
             if self.streaming_decoder is None:
@@ -330,16 +348,31 @@ class LiveVoicebankEngine:
             self._feature_frames_processed += feature_count
             self._processing_seconds += time.perf_counter() - started
 
+    def _append_direct_utterance(self, samples: AudioSamples) -> None:
+        """Retain a bounded speech utterance for endpoint re-decoding."""
+        self._direct_utterance_audio = np.concatenate(
+            (self._direct_utterance_audio, samples)
+        )
+        excess = len(self._direct_utterance_audio) - self.direct_utterance_samples
+        if excess > 0:
+            self._direct_utterance_audio = self._direct_utterance_audio[excess:]
+            self._direct_utterance_start_samples += excess
+
     def _process_direct_update(self, *, final: bool = False) -> None:
         if self.direct_recognizer is None or self.direct_planner is None:
             raise RuntimeError("direct IPA frontend is unavailable")
         if not final and self._direct_samples_since_update < self.direct_update_samples:
+            return
+        if not final and not self._direct_speech_seen:
             return
         if len(self._direct_audio) < 1:
             return
         total_samples = self._direct_total_samples
         window_start_samples = total_samples - len(self._direct_audio)
         window = self._direct_audio
+        if final and len(self._direct_utterance_audio):
+            window = self._direct_utterance_audio
+            window_start_samples = self._direct_utterance_start_samples
         actual_window_seconds = len(window) / self.extractor.config.sample_rate
         minimum_context_samples = round(0.8 * self.extractor.config.sample_rate)
         recognition_window = window
@@ -353,9 +386,13 @@ class LiveVoicebankEngine:
             self.extractor.config.sample_rate,
         )
         phones = tuple(
-            phone
+            replace(
+                phone,
+                end_seconds=min(phone.end_seconds, actual_window_seconds),
+            )
             for phone in phones
             if phone.start_seconds < actual_window_seconds + 1e-6
+            and phone.end_seconds > 0.0
         )
         self._detected_phones += len(phones)
         offset_seconds = window_start_samples / self.extractor.config.sample_rate

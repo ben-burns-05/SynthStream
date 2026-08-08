@@ -142,7 +142,8 @@ def test_live_engine_uses_direct_ipa_for_real_aiko_voicebank() -> None:
         buffer_duration_seconds=5.0,
     )
     engine.start(background=False)
-    backend.feed(np.mean(human, axis=1))
+    # Exercise the low-level signal range common to USB/wireless microphones.
+    backend.feed(np.mean(human, axis=1) * 0.01)
     engine.process_available()
     engine.flush()
     queued = engine.stream.output_buffer.read(engine.stream.output_buffer.available_samples)
@@ -191,7 +192,7 @@ def test_live_direct_endpoint_commits_a_short_final_word(
     engine.stop()
 
     statistics = engine.statistics
-    assert statistics.direct_ipa_updates >= 2
+    assert statistics.direct_ipa_updates >= 1
     assert statistics.committed_segments > 0
     assert statistics.rendered_output_samples > 0
 
@@ -246,7 +247,7 @@ def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -
 
     final_statistics = engine.statistics
     transport_statistics = engine.stream.statistics
-    assert quiet_statistics.direct_ipa_updates >= 4
+    assert quiet_statistics.direct_ipa_updates == 0
     assert quiet_statistics.detected_phones == 0
     assert first_statistics.direct_ipa_updates > quiet_statistics.direct_ipa_updates
     assert first_statistics.detected_phones > 0

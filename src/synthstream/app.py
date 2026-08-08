@@ -291,15 +291,24 @@ class MainWindow(QMainWindow):
             f"{statistics.direct_ipa_updates}, phones: {statistics.detected_phones}, "
             f"aliases: {statistics.planned_aliases}"
         )
+        input_seconds = max(
+            statistics.input_blocks_processed
+            * engine.stream.block_size
+            / engine.stream.sample_rate,
+            1e-6,
+        )
+        processing_load = statistics.processing_seconds / input_seconds
         self.latency_label.setText(
-            f"Total processing CPU time: {statistics.processing_seconds:.3f} s"
+            f"CPU time: {statistics.processing_seconds:.3f} s; "
+            f"load {processing_load:.0%}"
         )
         error_text = statistics.worker_error
         if error_text is None:
             self.errors_label.setText(
                 "Audio underflows: "
                 f"{stream_stats.output_underflow_samples}; input overflows: "
-                f"{stream_stats.input_overflow_samples}"
+                f"{stream_stats.input_overflow_samples}; output overflows: "
+                f"{stream_stats.output_overflow_samples}"
             )
             if (
                 self.is_converting

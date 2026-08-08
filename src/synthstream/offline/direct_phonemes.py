@@ -11,7 +11,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from huggingface_hub import hf_hub_download
-from transformers import AutoModelForCTC
+from transformers import AutoFeatureExtractor, AutoModelForCTC
 
 from synthstream.offline.voicebank_phonemizer import (
     VoicebankProfile,
@@ -54,24 +54,42 @@ class DirectPhoneticRecognition:
 class DirectIPARecognizer:
     """CTC phone recognizer that never creates words or invokes G2P."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, normalize_input: bool = False) -> None:
         self._model: Any | None = None
         self._labels: dict[int, str] | None = None
+        self._normalize_input = normalize_input
+        self._feature_extractor: Any | None = None
 
     def warmup(self) -> None:
         """Load model and vocabulary assets before audio capture begins."""
         self._ensure_model()
+        if self._normalize_input:
+            self._ensure_feature_extractor()
 
     def recognize(self, samples: FloatArray, sample_rate: int) -> tuple[DetectedPhone, ...]:
         if sample_rate != 16_000:
             raise ValueError("direct IPA recognizer requires 16 kHz audio")
         model, labels = self._ensure_model()
 
-        waveform = torch.from_numpy(
-            np.asarray(samples, dtype=np.float32).copy()
-        ).unsqueeze(0)
+        waveform = np.asarray(samples, dtype=np.float32).copy()
+        attention_mask: Any | None = None
+        if self._normalize_input:
+            extractor = self._ensure_feature_extractor()
+            encoded = extractor(
+                waveform,
+                sampling_rate=sample_rate,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            input_values = encoded.input_values
+            attention_mask = getattr(encoded, "attention_mask", None)
+        else:
+            input_values = torch.from_numpy(waveform).unsqueeze(0)
         with torch.inference_mode():
-            logits = model(waveform).logits[0]
+            if attention_mask is None:
+                logits = model(input_values).logits[0]
+            else:
+                logits = model(input_values, attention_mask=attention_mask).logits[0]
         probabilities = torch.softmax(logits, dim=-1)
         ids = torch.argmax(probabilities, dim=-1)
         frame_seconds = len(samples) / sample_rate / len(ids)
@@ -108,6 +126,11 @@ class DirectIPARecognizer:
         assert self._labels is not None
         return self._model, self._labels
 
+    def _ensure_feature_extractor(self) -> Any:
+        if self._feature_extractor is None:
+            self._feature_extractor = _load_feature_extractor()
+        return self._feature_extractor
+
 
 def _load_model_assets() -> tuple[Any, str]:
     """Prefer an installed model cache and use the network only on first setup."""
@@ -129,6 +152,17 @@ def _load_model_assets() -> tuple[Any, str]:
         ).eval()
         vocab_path = hf_hub_download(_MODEL_ID, "vocab.json")
     return model, vocab_path
+
+
+def _load_feature_extractor() -> Any:
+    """Load the wav2vec2 waveform normalizer used during model training."""
+    try:
+        return AutoFeatureExtractor.from_pretrained(  # type: ignore[no-untyped-call]
+            _MODEL_ID,
+            local_files_only=True,
+        )
+    except OSError:
+        return AutoFeatureExtractor.from_pretrained(_MODEL_ID)  # type: ignore[no-untyped-call]
 
 
 class DirectAliasPlanner:
