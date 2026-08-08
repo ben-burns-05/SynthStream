@@ -22,6 +22,17 @@ if not defined PYTHON_EXE (
 )
 
 set "PYTHONPATH=%PROJECT_ROOT%src;%PYTHONPATH%"
+%PYTHON_EXE% %PYTHON_ARGS% -c "import sounddevice, PySide6, torch, torchaudio, transformers" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo SynthStream dependencies are missing from:
+    echo   %PYTHON_EXE%
+    echo.
+    echo Install them with:
+    echo   %PYTHON_EXE% -m pip install -e "%PROJECT_ROOT%"
+    pause
+    exit /b 1
+)
 %PYTHON_EXE% %PYTHON_ARGS% -m synthstream %*
 if errorlevel 1 (
     echo.
