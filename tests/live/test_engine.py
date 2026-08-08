@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 
 import numpy as np
@@ -193,3 +194,68 @@ def test_live_direct_endpoint_commits_a_short_final_word(
     assert statistics.direct_ipa_updates >= 2
     assert statistics.committed_segments > 0
     assert statistics.rendered_output_samples > 0
+
+
+def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -> None:
+    """Exercise the production callback/worker path across long silent gaps."""
+    bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    if not bank_path.is_dir():
+        pytest.skip("local Aiko development voicebank is not installed")
+
+    human, sample_rate = sf.read(
+        PROJECT_ROOT / "tests" / "fixtures" / "human" / "voices_sentence.wav",
+        dtype="float32",
+        always_2d=True,
+    )
+    assert sample_rate == SAMPLE_RATE
+    speech = np.mean(human, axis=1)
+
+    def silence(seconds: float) -> np.ndarray:
+        return np.zeros(round(seconds * SAMPLE_RATE), dtype=np.float32)
+
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine.from_voicebank(
+        bank_path,
+        backend,
+        analysis_chunk_seconds=0.2,
+        direct_update_seconds=0.4,
+        buffer_duration_seconds=5.0,
+    )
+    engine.prepare_direct_ipa()
+    engine.start(background=True)
+
+    def feed_realtime(samples: np.ndarray) -> np.ndarray:
+        outputs: list[np.ndarray] = []
+        for start in range(0, len(samples), 320):
+            outputs.append(backend.feed(samples[start : start + 320]))
+            time.sleep(0.02)
+        return np.concatenate(outputs) if outputs else np.empty(0, dtype=np.float32)
+
+    try:
+        feed_realtime(silence(2.0))
+        quiet_statistics = engine.statistics
+        first_window = np.concatenate(
+            (feed_realtime(speech), feed_realtime(silence(4.0)))
+        )
+        first_statistics = engine.statistics
+        second_window = np.concatenate(
+            (feed_realtime(speech), feed_realtime(silence(3.0)))
+        )
+    finally:
+        engine.stop(flush=True)
+
+    final_statistics = engine.statistics
+    transport_statistics = engine.stream.statistics
+    assert quiet_statistics.direct_ipa_updates >= 4
+    assert quiet_statistics.detected_phones == 0
+    assert first_statistics.direct_ipa_updates > quiet_statistics.direct_ipa_updates
+    assert first_statistics.detected_phones > 0
+    assert first_statistics.committed_segments > 20
+    assert first_statistics.rendered_output_samples > 0
+    assert float(np.max(np.abs(first_window))) > 0.01
+    assert final_statistics.direct_ipa_updates > first_statistics.direct_ipa_updates
+    assert final_statistics.detected_phones > first_statistics.detected_phones
+    assert final_statistics.committed_segments > first_statistics.committed_segments
+    assert float(np.max(np.abs(second_window))) > 0.01
+    assert transport_statistics.input_overflow_samples == 0
+    assert final_statistics.worker_error is None
