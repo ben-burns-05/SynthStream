@@ -76,6 +76,8 @@ class LiveVoicebankEngine:
         direct_window_seconds: float = 1.2,
         direct_update_seconds: float = 0.4,
         direct_commit_lag_seconds: float = 0.4,
+        direct_endpoint_seconds: float = 0.24,
+        direct_silence_rms_threshold: float = 0.002,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
         if config.sample_rate != sample_rate:
@@ -90,6 +92,8 @@ class LiveVoicebankEngine:
             (direct_window_seconds, "direct_window_seconds"),
             (direct_update_seconds, "direct_update_seconds"),
             (direct_commit_lag_seconds, "direct_commit_lag_seconds"),
+            (direct_endpoint_seconds, "direct_endpoint_seconds"),
+            (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -130,6 +134,8 @@ class LiveVoicebankEngine:
         self.direct_window_samples = max(1, round(direct_window_seconds * sample_rate))
         self.direct_update_samples = max(1, round(direct_update_seconds * sample_rate))
         self.direct_commit_lag_seconds = direct_commit_lag_seconds
+        self.direct_endpoint_samples = max(1, round(direct_endpoint_seconds * sample_rate))
+        self.direct_silence_rms_threshold = direct_silence_rms_threshold
         self._units = {unit.id: unit for unit in bank.units}
         self._overlap_composer = BufferedOverlapComposer(sample_rate, staging_seconds=0.12)
         self._scheduled_output_samples = 0
@@ -140,6 +146,8 @@ class LiveVoicebankEngine:
         self._direct_total_samples = 0
         self._direct_samples_since_update = 0
         self._direct_emitted_seconds = 0.0
+        self._direct_quiet_samples = 0
+        self._direct_speech_seen = False
         self._emitted_output_samples = 0
         self._input_blocks_processed = 0
         self._feature_chunks_processed = 0
@@ -206,6 +214,8 @@ class LiveVoicebankEngine:
         self._direct_total_samples = 0
         self._direct_samples_since_update = 0
         self._direct_emitted_seconds = 0.0
+        self._direct_quiet_samples = 0
+        self._direct_speech_seen = False
         self._emitted_output_samples = 0
         self._scheduled_output_samples = 0
         self._previous_rendered_unit_id = None
@@ -298,6 +308,15 @@ class LiveVoicebankEngine:
                 self._direct_audio = self._direct_audio[-self.direct_window_samples :]
             self._direct_samples_since_update += len(samples)
             self._process_direct_update()
+            if self._input_rms >= self.direct_silence_rms_threshold:
+                self._direct_speech_seen = True
+                self._direct_quiet_samples = 0
+            elif self._direct_speech_seen:
+                self._direct_quiet_samples += len(samples)
+                if self._direct_quiet_samples >= self.direct_endpoint_samples:
+                    self._process_direct_update(final=True)
+                    self._direct_quiet_samples = 0
+                    self._direct_speech_seen = False
             feature_count = 0
         else:
             if self.streaming_decoder is None:
@@ -321,7 +340,23 @@ class LiveVoicebankEngine:
         total_samples = self._direct_total_samples
         window_start_samples = total_samples - len(self._direct_audio)
         window = self._direct_audio
-        phones = self.direct_recognizer.recognize(window, self.extractor.config.sample_rate)
+        actual_window_seconds = len(window) / self.extractor.config.sample_rate
+        minimum_context_samples = round(0.8 * self.extractor.config.sample_rate)
+        recognition_window = window
+        if len(recognition_window) < minimum_context_samples:
+            recognition_window = np.pad(
+                recognition_window,
+                (0, minimum_context_samples - len(recognition_window)),
+            ).astype(np.float32, copy=False)
+        phones = self.direct_recognizer.recognize(
+            recognition_window,
+            self.extractor.config.sample_rate,
+        )
+        phones = tuple(
+            phone
+            for phone in phones
+            if phone.start_seconds < actual_window_seconds + 1e-6
+        )
         self._detected_phones += len(phones)
         offset_seconds = window_start_samples / self.extractor.config.sample_rate
         shifted_phones = tuple(
@@ -355,9 +390,10 @@ class LiveVoicebankEngine:
         for alias in aliases:
             if alias.end_seconds > cutoff_seconds + 1e-6:
                 continue
-            if alias.start_seconds < self._direct_emitted_seconds - 1e-6:
+            effective_start_seconds = max(alias.start_seconds, self._direct_emitted_seconds)
+            if alias.end_seconds <= effective_start_seconds + 1e-6:
                 continue
-            start_frame = max(0, round(alias.start_seconds / hop_seconds))
+            start_frame = max(0, round(effective_start_seconds / hop_seconds))
             end_frame = max(start_frame + 1, round(alias.end_seconds / hop_seconds))
             boundaries = _phone_aware_section_boundaries(
                 alias,
@@ -392,7 +428,7 @@ class LiveVoicebankEngine:
                         section_cost,
                     )
                 )
-            self._direct_emitted_seconds = alias.end_seconds
+            self._direct_emitted_seconds = max(self._direct_emitted_seconds, alias.end_seconds)
         return tuple(segments)
 
     def _consume_committed(self, segments: tuple[DecodedSegment, ...]) -> None:

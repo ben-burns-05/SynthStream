@@ -7,6 +7,7 @@ import soundfile as sf
 from synthstream.analysis import AnalysisConfig
 from synthstream.audio import FakeDuplexAudioBackend
 from synthstream.live import LiveVoicebankEngine
+from synthstream.offline.direct_phonemes import DetectedPhone
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -152,3 +153,43 @@ def test_live_engine_uses_direct_ipa_for_real_aiko_voicebank() -> None:
     assert len(queued) > 0
     assert float(np.max(np.abs(queued))) > 0.01
     assert statistics.worker_error is None
+
+
+def test_live_direct_endpoint_commits_a_short_final_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    if not bank_path.is_dir():
+        pytest.skip("local Aiko development voicebank is not installed")
+
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine.from_voicebank(
+        bank_path,
+        backend,
+        analysis_chunk_seconds=0.2,
+        direct_update_seconds=0.4,
+        direct_endpoint_seconds=0.2,
+        buffer_duration_seconds=2.0,
+    )
+    assert engine.direct_recognizer is not None
+
+    def fake_recognize(
+        samples: np.ndarray, sample_rate: int
+    ) -> tuple[DetectedPhone, ...]:
+        del samples, sample_rate
+        return (
+            DetectedPhone("d", 0.05, 0.1, 0.9),
+            DetectedPhone("i", 0.1, 0.2, 0.9),
+        )
+
+    monkeypatch.setattr(engine.direct_recognizer, "recognize", fake_recognize)
+    engine.start(background=False)
+    source = np.concatenate((_tone(220, 0.2), np.zeros(round(SAMPLE_RATE * 0.4))))
+    backend.feed(source)
+    engine.process_available()
+    engine.stop()
+
+    statistics = engine.statistics
+    assert statistics.direct_ipa_updates >= 2
+    assert statistics.committed_segments > 0
+    assert statistics.rendered_output_samples > 0
