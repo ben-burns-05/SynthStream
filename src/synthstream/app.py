@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 from typing import Any, cast
 
 import sounddevice as sd  # type: ignore[import-untyped]
+import soundfile as sf  # type: ignore[import-untyped]
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -59,7 +62,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.setWindowTitle("SynthStream")
-        self.resize(760, 520)
+        self.resize(900, 680)
         self._bank = bank
         self._backend = backend
         self._backend_factory = backend_factory or (
@@ -116,12 +119,28 @@ class MainWindow(QMainWindow):
         controls.addWidget(self.stop_button)
         root_layout.addLayout(controls)
 
+        diagnostic_controls = QHBoxLayout()
+        self.save_report_button = QPushButton("Save diagnostics...")
+        self.save_report_button.clicked.connect(self.save_diagnostics_report)
+        self.save_input_button = QPushButton("Save recent mic WAV...")
+        self.save_input_button.clicked.connect(self.save_recent_input_wav)
+        self.save_input_button.setEnabled(False)
+        diagnostic_controls.addWidget(self.save_report_button)
+        diagnostic_controls.addWidget(self.save_input_button)
+        root_layout.addLayout(diagnostic_controls)
+
         self.status_label = QLabel("Select a voicebank to begin.")
         self.units_label = QLabel("Voicebank units: —")
         self.input_level_label = QLabel("Input level: —; buffer 0 samples")
         self.output_level_label = QLabel("Output buffer: 0 samples")
         self.committed_label = QLabel("Committed sections: 0")
         self.latency_label = QLabel("Total processing CPU time: 0.000 s")
+        self.health_label = QLabel("Waiting for conversion.")
+        self.diagnostic_detail_label = QLabel(
+            "Use Save recent mic WAV when recognition is poor; it captures the exact input "
+            "seen by the live worker."
+        )
+        self.diagnostic_detail_label.setWordWrap(True)
         diagnostics = QFormLayout()
         diagnostics.addRow("Status", self.status_label)
         diagnostics.addRow("Voicebank", self.units_label)
@@ -129,7 +148,9 @@ class MainWindow(QMainWindow):
         diagnostics.addRow("Output", self.output_level_label)
         diagnostics.addRow("Matching", self.committed_label)
         diagnostics.addRow("Processing", self.latency_label)
+        diagnostics.addRow("Health", self.health_label)
         diagnostics.addRow("Audio", self.errors_label)
+        diagnostics.addRow("Diagnostic", self.diagnostic_detail_label)
         root_layout.addLayout(diagnostics)
         root_layout.addStretch(1)
 
@@ -240,6 +261,7 @@ class MainWindow(QMainWindow):
             self._timer.stop()
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
+            self.save_input_button.setEnabled(False)
             self.status_label.setText("Conversion stopped.")
             return
         engine = self._engine
@@ -248,6 +270,7 @@ class MainWindow(QMainWindow):
         self._timer.stop()
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.save_input_button.setEnabled(False)
         self.status_label.setText("Conversion stopped.")
         self.refresh_status()
 
@@ -282,6 +305,7 @@ class MainWindow(QMainWindow):
             f"Input: peak {statistics.input_peak:.3f}, RMS {statistics.input_rms:.3f}; "
             f"buffer {engine.stream.input_buffer.available_samples} samples"
         )
+        self.save_input_button.setEnabled(statistics.input_blocks_processed > 0)
         self.output_level_label.setText(
             f"Output buffer: {engine.stream.output_buffer.available_samples} samples"
         )
@@ -310,6 +334,9 @@ class MainWindow(QMainWindow):
                 f"{stream_stats.input_overflow_samples}; output overflows: "
                 f"{stream_stats.output_overflow_samples}"
             )
+            self.health_label.setText(
+                self._diagnostic_health(statistics, stream_stats, processing_load)
+            )
             if (
                 self.is_converting
                 and self._use_direct_ipa
@@ -332,6 +359,128 @@ class MainWindow(QMainWindow):
                 )
         else:
             self.errors_label.setText(f"Audio errors: {error_text}")
+            self.health_label.setText("Worker stopped: inspect the error above.")
+
+    def save_diagnostics_report(self) -> None:
+        """Write a JSON snapshot that can be attached to a bug report."""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save SynthStream diagnostics",
+            "synthstream-diagnostics.json",
+            "JSON files (*.json)",
+        )
+        if not path:
+            return
+        engine = self._engine
+        report: dict[str, Any] = {
+            "created_utc": datetime.now(UTC).isoformat(),
+            "voicebank": str(self._bank.root) if self._bank is not None else None,
+            "input_device": self.input_device_combo.currentText(),
+            "input_device_value": self.input_device_combo.currentData(),
+            "output_device": self.output_device_combo.currentText(),
+            "output_device_value": self.output_device_combo.currentData(),
+            "status": self.status_label.text(),
+            "health": self.health_label.text(),
+        }
+        try:
+            report["input_device_info"] = dict(
+                sd.query_devices(self.input_device_combo.currentData(), "input")
+            )
+        except Exception as error:  # pragma: no cover - hardware-dependent
+            report["input_device_query_error"] = str(error)
+        try:
+            report["output_device_info"] = dict(
+                sd.query_devices(self.output_device_combo.currentData(), "output")
+            )
+        except Exception as error:  # pragma: no cover - hardware-dependent
+            report["output_device_query_error"] = str(error)
+        try:
+            sd.check_input_settings(
+                device=self.input_device_combo.currentData(),
+                samplerate=16_000,
+                channels=1,
+                dtype="float32",
+            )
+            report["input_16khz_supported"] = True
+        except Exception as error:  # pragma: no cover - hardware-dependent
+            report["input_16khz_supported"] = False
+            report["input_16khz_error"] = str(error)
+        if engine is not None:
+            statistics = engine.statistics
+            stream_stats = engine.stream.statistics
+            report["engine"] = {
+                "statistics": {
+                    "input_blocks_processed": statistics.input_blocks_processed,
+                    "feature_chunks_processed": statistics.feature_chunks_processed,
+                    "committed_segments": statistics.committed_segments,
+                    "rendered_output_samples": statistics.rendered_output_samples,
+                    "processing_seconds": statistics.processing_seconds,
+                    "direct_ipa_updates": statistics.direct_ipa_updates,
+                    "detected_phones": statistics.detected_phones,
+                    "planned_aliases": statistics.planned_aliases,
+                    "input_peak": statistics.input_peak,
+                    "input_rms": statistics.input_rms,
+                    "worker_error": statistics.worker_error,
+                },
+                "stream": {
+                    "input_buffer_samples": engine.stream.input_buffer.available_samples,
+                    "output_buffer_samples": engine.stream.output_buffer.available_samples,
+                    "input_overflow_samples": stream_stats.input_overflow_samples,
+                    "output_overflow_samples": stream_stats.output_overflow_samples,
+                    "output_underflow_samples": stream_stats.output_underflow_samples,
+                    "callback_statuses": list(stream_stats.callback_statuses),
+                },
+            }
+        try:
+            Path(path).write_text(
+                json.dumps(report, indent=2, default=str),
+                encoding="utf-8",
+            )
+            self.status_label.setText(f"Diagnostics saved to {path}")
+        except OSError as error:
+            self.status_label.setText(f"Unable to save diagnostics: {error}")
+
+    def save_recent_input_wav(self) -> None:
+        """Write the recent raw microphone samples captured by the worker."""
+        engine = self._engine
+        if engine is None:
+            self.status_label.setText("Start conversion before saving microphone input.")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save recent microphone input",
+            "synthstream-input.wav",
+            "WAV files (*.wav)",
+        )
+        if not path:
+            return
+        samples = engine.recent_input_audio()
+        if not len(samples):
+            self.status_label.setText("No microphone samples have been captured yet.")
+            return
+        try:
+            sf.write(path, samples, engine.stream.sample_rate)
+            self.status_label.setText(f"Microphone input saved to {path}")
+        except OSError as error:
+            self.status_label.setText(f"Unable to save microphone input: {error}")
+
+    @staticmethod
+    def _diagnostic_health(statistics: Any, stream_stats: Any, processing_load: float) -> str:
+        if stream_stats.input_overflow_samples:
+            return "Input overflow: worker cannot keep up; speech samples are being dropped."
+        if stream_stats.output_overflow_samples:
+            return "Output overflow: rendered audio is arriving in bursts and being dropped."
+        if processing_load > 1.0:
+            return "Overloaded: processing is slower than realtime."
+        if statistics.input_blocks_processed >= 4 and statistics.input_peak < 0.001:
+            return "No usable microphone signal detected."
+        if statistics.direct_ipa_updates >= 2 and statistics.detected_phones == 0:
+            return "Signal present but no phones detected; inspect the saved input WAV."
+        if statistics.detected_phones and statistics.planned_aliases == 0:
+            return "Phones detected but no voicebank aliases mapped."
+        if statistics.rendered_output_samples and stream_stats.output_underflow_samples:
+            return "Recognition works; output is intermittently starving."
+        return "Live path healthy."
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self.is_converting or self.is_starting:

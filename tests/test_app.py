@@ -148,6 +148,48 @@ def test_gui_controls_production_engine_end_to_end(tmp_path: Path, qtbot: QtBot)
     window.refresh_status()
     assert "Committed sections:" in window.committed_label.text()
     assert window.errors_label.text().startswith("Audio underflows:")
+    assert window.health_label.text()
+
+
+def test_gui_exports_diagnostics_and_recent_input(
+    tmp_path: Path, qtbot: QtBot, monkeypatch
+) -> None:
+    _make_bank(tmp_path)
+    backend = FakeDuplexAudioBackend()
+    window = MainWindow(
+        bank=load_voicebank(tmp_path, use_cache=False),
+        backend=backend,
+        use_direct_ipa=False,
+        engine_kwargs={"analysis_chunk_seconds": 0.1},
+    )
+    qtbot.addWidget(window)
+    window.start_conversion()
+    backend.feed(np.ones(3_200, dtype=np.float32) * 0.1)
+    qtbot.waitUntil(
+        lambda: window.engine is not None
+        and window.engine.statistics.input_blocks_processed > 0,
+        timeout=10_000,
+    )
+
+    report_path = tmp_path / "diagnostics.json"
+    input_path = tmp_path / "input.wav"
+    paths = iter(
+        (
+            (str(report_path), "JSON files (*.json)"),
+            (str(input_path), "WAV files (*.wav)"),
+        )
+    )
+    monkeypatch.setattr(
+        "synthstream.app.QFileDialog.getSaveFileName",
+        lambda *args, **kwargs: next(paths),
+    )
+    window.save_diagnostics_report()
+    window.save_recent_input_wav()
+    window.stop_conversion()
+
+    assert report_path.is_file()
+    assert input_path.is_file()
+    assert '"engine"' in report_path.read_text(encoding="utf-8")
 
 
 def test_gui_direct_aiko_voicebank_end_to_end(qtbot: QtBot) -> None:

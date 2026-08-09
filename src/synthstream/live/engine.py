@@ -79,6 +79,7 @@ class LiveVoicebankEngine:
         direct_endpoint_seconds: float = 0.24,
         direct_silence_rms_threshold: float = 0.00005,
         direct_utterance_seconds: float = 6.0,
+        diagnostic_input_seconds: float = 10.0,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
         if config.sample_rate != sample_rate:
@@ -96,6 +97,7 @@ class LiveVoicebankEngine:
             (direct_endpoint_seconds, "direct_endpoint_seconds"),
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
             (direct_utterance_seconds, "direct_utterance_seconds"),
+            (diagnostic_input_seconds, "diagnostic_input_seconds"),
         ):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
@@ -139,6 +141,7 @@ class LiveVoicebankEngine:
         self.direct_endpoint_samples = max(1, round(direct_endpoint_seconds * sample_rate))
         self.direct_silence_rms_threshold = direct_silence_rms_threshold
         self.direct_utterance_samples = max(1, round(direct_utterance_seconds * sample_rate))
+        self.diagnostic_input_samples = max(1, round(diagnostic_input_seconds * sample_rate))
         self._units = {unit.id: unit for unit in bank.units}
         self._overlap_composer = BufferedOverlapComposer(sample_rate, staging_seconds=0.12)
         self._scheduled_output_samples = 0
@@ -151,6 +154,7 @@ class LiveVoicebankEngine:
         self._direct_emitted_seconds = 0.0
         self._direct_utterance_audio = np.empty(0, dtype=np.float32)
         self._direct_utterance_start_samples = 0
+        self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
         self._emitted_output_samples = 0
@@ -221,6 +225,7 @@ class LiveVoicebankEngine:
         self._direct_emitted_seconds = 0.0
         self._direct_utterance_audio = np.empty(0, dtype=np.float32)
         self._direct_utterance_start_samples = 0
+        self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
         self._emitted_output_samples = 0
@@ -259,10 +264,16 @@ class LiveVoicebankEngine:
                 break
             block = self.stream.read_input(self.stream.block_size)
             self._input_blocks_processed += 1
+            self._append_diagnostic_input(block)
             self._pending_input = np.concatenate((self._pending_input, block))
             self._process_complete_chunks()
             processed += 1
         return processed
+
+    def recent_input_audio(self) -> AudioSamples:
+        """Return the most recent captured microphone samples for diagnostics."""
+        with self._statistics_lock:
+            return self._diagnostic_input_audio.copy()
 
     def flush(self) -> None:
         """Analyze pending samples and commit/render the complete current path."""
@@ -357,6 +368,12 @@ class LiveVoicebankEngine:
         if excess > 0:
             self._direct_utterance_audio = self._direct_utterance_audio[excess:]
             self._direct_utterance_start_samples += excess
+
+    def _append_diagnostic_input(self, samples: AudioSamples) -> None:
+        with self._statistics_lock:
+            self._diagnostic_input_audio = np.concatenate(
+                (self._diagnostic_input_audio, samples)
+            )[-self.diagnostic_input_samples :]
 
     def _process_direct_update(self, *, final: bool = False) -> None:
         if self.direct_recognizer is None or self.direct_planner is None:
