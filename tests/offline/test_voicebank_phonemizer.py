@@ -57,6 +57,26 @@ def test_real_bank_profile_resolves_direct_phones_to_existing_aliases(
         assert aliases[:3] == ["- aI", "aI h{", "{ d"]
 
 
+def test_real_aiko_profile_accepts_wav2vec_short_vowel_variants() -> None:
+    """Short isolated words can yield ``o``/``eː`` instead of diphthongs."""
+    bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    if not bank_path.is_dir():
+        pytest.skip("local Aiko development voicebank is not installed")
+
+    bank = load_voicebank(bank_path)
+    capability = detect_voicebank_profile(bank)
+    assert capability.profile is not None
+    phones = tuple(
+        DetectedPhone(phone, index * 0.4, (index + 1) * 0.4, 0.9)
+        for index, phone in enumerate(("o", "k", "eː"))
+    )
+
+    recognition = DirectAliasPlanner(bank, capability.profile).plan(phones)
+
+    assert recognition.unmapped_phones == ()
+    assert [planned.alias for planned in recognition.aliases]
+
+
 def test_teto_presamp_metadata_is_read_as_declarative_profile_data() -> None:
     path = next(
         (PROJECT_ROOT / "voicebank" / "TETO-English-150401").rglob("presamp.ini"),

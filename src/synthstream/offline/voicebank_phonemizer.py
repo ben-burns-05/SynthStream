@@ -277,7 +277,13 @@ def _english_cvvc_profile() -> VoicebankProfile:
         {
             "aɪ": "I", "æ": "@", "ɑː": "9", "ɑ": "9", "ə": "u", "ʌ": "u",
             "ɪ": "i", "i": "E", "iː": "E", "ʊ": "6", "u": "o", "uː": "o",
-            "oʊ": "O", "ɛ": "e", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
+            # wav2vec2 may emit monophthong/lengthened variants for English
+            # diphthongs (for example ``o``/``oː`` for ``oʊ`` and ``eː`` for
+            # ``eɪ``). Treat them as the corresponding bank vowel so short
+            # words do not disappear simply because of a label variant.
+            "oʊ": "O", "o": "O", "oː": "O",
+            "eɪ": "e", "eː": "e",
+            "ɛ": "e", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
             "ð": "dh", "t": "t", "k": "k", "j": "y", "ɹ": "r", "r": "r",
             "s": "s", "b": "b", "m": "m", "n": "n", "ŋ": "ng", "l": "l",
             "w": "w", "f": "f", "v": "v", "θ": "th", "ʃ": "sh", "ʒ": "zh",
@@ -301,7 +307,11 @@ def _english_presamp_profile() -> VoicebankProfile:
         {
             "aɪ": "aI", "æ": "{", "ɑː": "A", "ɑ": "A", "ə": "@", "ʌ": "V",
             "ɪ": "i", "i": "I", "iː": "I", "ʊ": "U", "u": "u", "uː": "u",
-            "oʊ": "oU", "ɛ": "E", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
+            # See the CVVC profile above for why the short/lengthened forms
+            # are accepted in addition to the canonical diphthongs.
+            "oʊ": "oU", "o": "oU", "oː": "oU",
+            "eɪ": "eI", "eː": "eI",
+            "ɛ": "E", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
             "ð": "D", "t": "t", "k": "k", "j": "j", "ɹ": "r", "r": "r",
             "s": "s", "b": "b", "m": "m", "n": "n", "ŋ": "N", "l": "l",
             "w": "w", "f": "f", "v": "v", "θ": "T", "ʃ": "S", "ʒ": "Z",
