@@ -283,6 +283,7 @@ def _english_cvvc_profile() -> VoicebankProfile:
             # words do not disappear simply because of a label variant.
             "oʊ": "O", "o": "O", "oː": "O",
             "eɪ": "e", "eː": "e",
+            "a": "u", "aː": "u", "ɐ": "u", "ᵻ": "i",
             "ɛ": "e", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
             "ð": "dh", "t": "t", "k": "k", "j": "y", "ɹ": "r", "r": "r",
             "s": "s", "b": "b", "m": "m", "n": "n", "ŋ": "ng", "l": "l",
@@ -311,6 +312,7 @@ def _english_presamp_profile() -> VoicebankProfile:
             # are accepted in addition to the canonical diphthongs.
             "oʊ": "oU", "o": "oU", "oː": "oU",
             "eɪ": "eI", "eː": "eI",
+            "a": "V", "aː": "V", "ɐ": "V", "ᵻ": "i",
             "ɛ": "E", "ɜː": "3", "h": "h", "d": "d", "ɾ": "d",
             "ð": "D", "t": "t", "k": "k", "j": "j", "ɹ": "r", "r": "r",
             "s": "s", "b": "b", "m": "m", "n": "n", "ŋ": "N", "l": "l",

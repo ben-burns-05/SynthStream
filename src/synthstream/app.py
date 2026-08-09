@@ -303,6 +303,7 @@ class MainWindow(QMainWindow):
         stream_stats = engine.stream.statistics
         self.input_level_label.setText(
             f"Input: peak {statistics.input_peak:.3f}, RMS {statistics.input_rms:.3f}; "
+            f"max {statistics.input_peak_max:.3f}, clipped {statistics.input_clipped_samples}; "
             f"buffer {engine.stream.input_buffer.available_samples} samples"
         )
         self.save_input_button.setEnabled(statistics.input_blocks_processed > 0)
@@ -420,6 +421,8 @@ class MainWindow(QMainWindow):
                     "planned_aliases": statistics.planned_aliases,
                     "input_peak": statistics.input_peak,
                     "input_rms": statistics.input_rms,
+                    "input_peak_max": statistics.input_peak_max,
+                    "input_clipped_samples": statistics.input_clipped_samples,
                     "worker_error": statistics.worker_error,
                 },
                 "stream": {
@@ -470,6 +473,8 @@ class MainWindow(QMainWindow):
             return "Input overflow: worker cannot keep up; speech samples are being dropped."
         if stream_stats.output_overflow_samples:
             return "Output overflow: rendered audio is arriving in bursts and being dropped."
+        if statistics.input_clipped_samples:
+            return "Input clipping detected: lower microphone gain before judging recognition."
         if processing_load > 1.0:
             return "Overloaded: processing is slower than realtime."
         if statistics.input_blocks_processed >= 4 and statistics.input_peak < 0.001:

@@ -46,6 +46,8 @@ class LiveEngineStatistics:
     input_peak: float
     input_rms: float
     worker_error: str | None
+    input_peak_max: float
+    input_clipped_samples: int
 
 
 class LiveVoicebankEngine:
@@ -79,6 +81,7 @@ class LiveVoicebankEngine:
         direct_endpoint_seconds: float = 0.24,
         direct_silence_rms_threshold: float = 0.00005,
         direct_utterance_seconds: float = 6.0,
+        direct_context_padding_seconds: float = 0.2,
         diagnostic_input_seconds: float = 10.0,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
@@ -97,6 +100,7 @@ class LiveVoicebankEngine:
             (direct_endpoint_seconds, "direct_endpoint_seconds"),
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
             (direct_utterance_seconds, "direct_utterance_seconds"),
+            (direct_context_padding_seconds, "direct_context_padding_seconds"),
             (diagnostic_input_seconds, "diagnostic_input_seconds"),
         ):
             if not math.isfinite(value) or value <= 0:
@@ -141,6 +145,9 @@ class LiveVoicebankEngine:
         self.direct_endpoint_samples = max(1, round(direct_endpoint_seconds * sample_rate))
         self.direct_silence_rms_threshold = direct_silence_rms_threshold
         self.direct_utterance_samples = max(1, round(direct_utterance_seconds * sample_rate))
+        self.direct_context_padding_samples = max(
+            1, round(direct_context_padding_seconds * sample_rate)
+        )
         self.diagnostic_input_samples = max(1, round(diagnostic_input_seconds * sample_rate))
         self._units = {unit.id: unit for unit in bank.units}
         self._overlap_composer = BufferedOverlapComposer(sample_rate, staging_seconds=0.12)
@@ -169,6 +176,8 @@ class LiveVoicebankEngine:
         self._planned_aliases = 0
         self._input_peak = 0.0
         self._input_rms = 0.0
+        self._input_peak_max = 0.0
+        self._input_clipped_samples = 0
         self._worker_error: str | None = None
         self._statistics_lock = Lock()
         self._worker_stop = Event()
@@ -210,6 +219,8 @@ class LiveVoicebankEngine:
                 self._input_peak,
                 self._input_rms,
                 self._worker_error,
+                self._input_peak_max,
+                self._input_clipped_samples,
             )
 
     def start(self, *, background: bool = True) -> None:
@@ -237,6 +248,10 @@ class LiveVoicebankEngine:
         self.stream.output_buffer.clear()
         self._worker_stop.clear()
         self._worker_error = None
+        self._input_peak = 0.0
+        self._input_rms = 0.0
+        self._input_peak_max = 0.0
+        self._input_clipped_samples = 0
         self.stream.start()
         if background:
             self._worker = Thread(target=self._worker_loop, name="synthstream-live", daemon=True)
@@ -264,6 +279,11 @@ class LiveVoicebankEngine:
                 break
             block = self.stream.read_input(self.stream.block_size)
             self._input_blocks_processed += 1
+            block_peak = float(np.max(np.abs(block))) if len(block) else 0.0
+            clipped_samples = int(np.count_nonzero(np.abs(block) >= 0.98))
+            with self._statistics_lock:
+                self._input_peak_max = max(self._input_peak_max, block_peak)
+                self._input_clipped_samples += clipped_samples
             self._append_diagnostic_input(block)
             self._pending_input = np.concatenate((self._pending_input, block))
             self._process_complete_chunks()
@@ -387,10 +407,21 @@ class LiveVoicebankEngine:
         total_samples = self._direct_total_samples
         window_start_samples = total_samples - len(self._direct_audio)
         window = self._direct_audio
+        context_left_samples = 0
+        context_right_samples = 0
         if final and len(self._direct_utterance_audio):
             window = self._direct_utterance_audio
             window_start_samples = self._direct_utterance_start_samples
+            context_right_samples = self.direct_context_padding_samples
+            window = np.pad(
+                window,
+                (0, context_right_samples),
+            ).astype(np.float32, copy=False)
         actual_window_seconds = len(window) / self.extractor.config.sample_rate
+        valid_start_seconds = context_left_samples / self.extractor.config.sample_rate
+        valid_end_seconds = actual_window_seconds - (
+            context_right_samples / self.extractor.config.sample_rate
+        )
         minimum_context_samples = round(0.8 * self.extractor.config.sample_rate)
         recognition_window = window
         if len(recognition_window) < minimum_context_samples:
@@ -405,14 +436,28 @@ class LiveVoicebankEngine:
         phones = tuple(
             replace(
                 phone,
-                end_seconds=min(phone.end_seconds, actual_window_seconds),
+                start_seconds=max(phone.start_seconds, valid_start_seconds),
+                end_seconds=min(phone.end_seconds, valid_end_seconds),
             )
             for phone in phones
-            if phone.start_seconds < actual_window_seconds + 1e-6
-            and phone.end_seconds > 0.0
+            if phone.start_seconds < valid_end_seconds + 1e-6
+            and phone.end_seconds > valid_start_seconds
         )
+        if context_left_samples:
+            phones = tuple(
+                replace(
+                    phone,
+                    start_seconds=phone.start_seconds - valid_start_seconds,
+                    end_seconds=phone.end_seconds - valid_start_seconds,
+                )
+                for phone in phones
+            )
         self._detected_phones += len(phones)
-        offset_seconds = window_start_samples / self.extractor.config.sample_rate
+        offset_seconds = (
+            self._direct_utterance_start_samples
+            if final and len(self._direct_utterance_audio)
+            else window_start_samples
+        ) / self.extractor.config.sample_rate
         shifted_phones = tuple(
             replace(
                 phone,

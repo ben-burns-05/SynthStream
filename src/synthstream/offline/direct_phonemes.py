@@ -30,6 +30,8 @@ class DetectedPhone:
     start_seconds: float
     end_seconds: float
     confidence: float
+    # Alternative CTC labels at the phone's strongest frame.
+    alternatives: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +68,17 @@ class DirectIPARecognizer:
         if self._normalize_input:
             self._ensure_feature_extractor()
 
-    def recognize(self, samples: FloatArray, sample_rate: int) -> tuple[DetectedPhone, ...]:
+    def recognize(
+        self,
+        samples: FloatArray,
+        sample_rate: int,
+        *,
+        top_k: int = 4,
+    ) -> tuple[DetectedPhone, ...]:
         if sample_rate != 16_000:
             raise ValueError("direct IPA recognizer requires 16 kHz audio")
+        if top_k < 1:
+            raise ValueError("top_k must be positive")
         model, labels = self._ensure_model()
 
         waveform = np.asarray(samples, dtype=np.float32).copy()
@@ -93,15 +103,25 @@ class DirectIPARecognizer:
         probabilities = torch.softmax(logits, dim=-1)
         ids = torch.argmax(probabilities, dim=-1)
         frame_seconds = len(samples) / sample_rate / len(ids)
-        spikes: list[tuple[str, int, float]] = []
+        spikes: list[tuple[str, int, float, tuple[tuple[str, float], ...]]] = []
         previous = -1
         for frame, token_tensor in enumerate(ids):
             token = int(token_tensor)
             if token != previous and token != 0:
-                spikes.append((labels[token], frame, float(probabilities[frame, token])))
+                values, indices = torch.topk(
+                    probabilities[frame], min(top_k + 1, probabilities.shape[-1])
+                )
+                alternatives = tuple(
+                    (labels[int(index)], float(value))
+                    for value, index in zip(values, indices, strict=True)
+                    if int(index) != 0
+                )[:top_k]
+                spikes.append(
+                    (labels[token], frame, float(probabilities[frame, token]), alternatives)
+                )
             previous = token
         phones: list[DetectedPhone] = []
-        for index, (ipa, frame, confidence) in enumerate(spikes):
+        for index, (ipa, frame, confidence, alternatives) in enumerate(spikes):
             left = 0 if index == 0 else round((spikes[index - 1][1] + frame) / 2)
             right = (
                 len(ids)
@@ -114,6 +134,7 @@ class DirectIPARecognizer:
                     left * frame_seconds,
                     right * frame_seconds,
                     confidence,
+                    alternatives,
                 )
             )
         return tuple(phones)
@@ -180,12 +201,11 @@ class DirectAliasPlanner:
                 (),
                 tuple(phone.ipa for phone in phones),
             )
+        selected_phones = self._select_voicebank_compatible_path(phones)
         candidates = resolve_alias_candidates(
-            tuple(phone.ipa for phone in phones),
-            self.bank,
-            self.profile,
+            tuple(phone.ipa for phone in selected_phones), self.bank, self.profile
         )
-        mapped = [self.profile.symbol_for(phone.ipa) for phone in phones]
+        mapped = [self.profile.symbol_for(phone.ipa) for phone in selected_phones]
         covered = {index for candidate in candidates for index in candidate.phone_indices}
         unmapped = tuple(
             phone.ipa
@@ -193,24 +213,30 @@ class DirectAliasPlanner:
             if symbol is None or index not in covered
         )
         if not candidates:
-            return DirectPhoneticRecognition(phones, (), unmapped)
+            return DirectPhoneticRecognition(selected_phones, (), unmapped)
         anchors = [
             float(
                 np.mean(
                     [
-                        (phones[index].start_seconds + phones[index].end_seconds) / 2
+                        (
+                            selected_phones[index].start_seconds
+                            + selected_phones[index].end_seconds
+                        )
+                        / 2
                         for index in candidate.phone_indices
                     ]
                 )
             )
             for candidate in candidates
         ]
-        boundaries = [phones[candidates[0].phone_indices[0]].start_seconds]
+        boundaries = [selected_phones[candidates[0].phone_indices[0]].start_seconds]
         boundaries.extend(
             float((left + right) / 2)
             for left, right in zip(anchors, anchors[1:], strict=False)
         )
-        boundaries.append(phones[candidates[-1].phone_indices[-1]].end_seconds)
+        boundaries.append(
+            selected_phones[candidates[-1].phone_indices[-1]].end_seconds
+        )
         planned = tuple(
             DirectPlannedAlias(
                 candidate.alias,
@@ -218,11 +244,82 @@ class DirectAliasPlanner:
                 candidate.phone_indices,
                 boundaries[index],
                 boundaries[index + 1],
-                float(np.mean([phones[i].confidence for i in candidate.phone_indices])),
+                float(
+                    np.mean(
+                        [
+                            selected_phones[i].confidence
+                            for i in candidate.phone_indices
+                        ]
+                    )
+                ),
             )
             for index, candidate in enumerate(candidates)
         )
-        return DirectPhoneticRecognition(phones, planned, unmapped)
+        return DirectPhoneticRecognition(selected_phones, planned, unmapped)
+
+    def _select_voicebank_compatible_path(
+        self, phones: tuple[DetectedPhone, ...]
+    ) -> tuple[DetectedPhone, ...]:
+        """Prefer a high-probability phone path that maps in this bank."""
+        if self.profile is None or not phones:
+            return phones
+        primary_candidates = resolve_alias_candidates(
+            tuple(phone.ipa for phone in phones), self.bank, self.profile
+        )
+        primary_covered = {
+            index
+            for candidate in primary_candidates
+            for index in candidate.phone_indices
+        }
+        # Long, already-mappable utterances are the common case.  Avoid
+        # repeatedly exploring their alternatives on every rolling update;
+        # reserve the beam for short/ambiguous words where it matters most.
+        if len(phones) > 16 and len(primary_covered) >= len(phones) * 0.8:
+            return phones
+        beam: list[tuple[tuple[DetectedPhone, ...], float]] = [((), 0.0)]
+        for phone in phones:
+            options = (phone.alternatives or ((phone.ipa, phone.confidence),))[:3]
+            deduplicated: dict[str, float] = {}
+            for ipa, confidence in options:
+                deduplicated.setdefault(ipa, confidence)
+            expanded: list[tuple[tuple[DetectedPhone, ...], float]] = []
+            for path, score in beam:
+                for ipa, confidence in deduplicated.items():
+                    expanded.append(
+                        (
+                            path
+                            + (
+                                DetectedPhone(
+                                    ipa,
+                                    phone.start_seconds,
+                                    phone.end_seconds,
+                                    confidence,
+                                    phone.alternatives,
+                                ),
+                            ),
+                            score + float(np.log(max(confidence, 1e-6))),
+                        )
+                    )
+            expanded.sort(
+                key=lambda item: self._path_score(item[0], item[1]), reverse=True
+            )
+            beam = expanded[:12]
+        best_path, _ = max(
+            beam, key=lambda item: self._path_score(item[0], item[1])
+        )
+        return best_path
+
+    def _path_score(
+        self, phones: tuple[DetectedPhone, ...], acoustic_score: float
+    ) -> float:
+        if self.profile is None:
+            return acoustic_score
+        candidates = resolve_alias_candidates(
+            tuple(phone.ipa for phone in phones), self.bank, self.profile
+        )
+        covered = {index for candidate in candidates for index in candidate.phone_indices}
+        # Inventory coverage dominates small probability differences.
+        return acoustic_score + 4.0 * len(covered) + 0.25 * len(candidates)
 
 
 class AikoDirectAliasPlanner(DirectAliasPlanner):

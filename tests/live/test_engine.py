@@ -80,6 +80,25 @@ def test_live_engine_retains_recent_raw_input_for_diagnostics(tmp_path: Path) ->
     assert np.max(np.abs(recent)) > 0.01
 
 
+def test_live_engine_tracks_clipping_across_the_capture_window(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine(
+        load_voicebank(tmp_path, use_cache=False),
+        backend,
+        use_direct_ipa=False,
+        diagnostic_input_seconds=0.1,
+    )
+    engine.start(background=False)
+    backend.feed(np.full(round(0.2 * SAMPLE_RATE), 1.0, dtype=np.float32))
+    engine.process_available()
+    engine.stop()
+
+    statistics = engine.statistics
+    assert statistics.input_peak_max == pytest.approx(1.0)
+    assert statistics.input_clipped_samples > 0
+
+
 def test_live_engine_flush_is_idempotent_after_final_decoder_commit(tmp_path: Path) -> None:
     _make_bank(tmp_path)
     backend = FakeDuplexAudioBackend()
@@ -194,11 +213,13 @@ def test_live_direct_endpoint_commits_a_short_final_word(
         buffer_duration_seconds=2.0,
     )
     assert engine.direct_recognizer is not None
+    recognized_lengths: list[int] = []
 
     def fake_recognize(
         samples: np.ndarray, sample_rate: int
     ) -> tuple[DetectedPhone, ...]:
-        del samples, sample_rate
+        del sample_rate
+        recognized_lengths.append(len(samples))
         return (
             DetectedPhone("d", 0.05, 0.1, 0.9),
             DetectedPhone("i", 0.1, 0.2, 0.9),
@@ -215,6 +236,8 @@ def test_live_direct_endpoint_commits_a_short_final_word(
     assert statistics.direct_ipa_updates >= 1
     assert statistics.committed_segments > 0
     assert statistics.rendered_output_samples > 0
+    assert recognized_lengths
+    assert max(recognized_lengths) >= round(0.4 * SAMPLE_RATE)
 
 
 def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -> None:

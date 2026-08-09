@@ -77,6 +77,28 @@ def test_real_aiko_profile_accepts_wav2vec_short_vowel_variants() -> None:
     assert [planned.alias for planned in recognition.aliases]
 
 
+def test_alias_planner_uses_top_k_phone_path_when_argmax_is_unusable() -> None:
+    bank_path = PROJECT_ROOT / "voicebank" / "Kikyuune Aiko RockLoud CVVC EN"
+    if not bank_path.is_dir():
+        pytest.skip("local Aiko development voicebank is not installed")
+
+    bank = load_voicebank(bank_path)
+    unknown = DetectedPhone("z", 0.0, 0.2, 0.05, (("z", 0.05), ("b", 0.7)))
+    onset = DetectedPhone("z", 0.2, 0.4, 0.05, (("z", 0.05), ("r", 0.7)))
+    vowel = DetectedPhone(
+        "z",
+        0.4,
+        0.8,
+        0.05,
+        (("z", 0.05), (chr(0x028C), 0.7)),
+    )
+
+    recognition = DirectAliasPlanner(bank).plan((unknown, onset, vowel))
+
+    assert [planned.alias for planned in recognition.aliases] == ["bru"]
+    assert recognition.unmapped_phones == ()
+
+
 def test_teto_presamp_metadata_is_read_as_declarative_profile_data() -> None:
     path = next(
         (PROJECT_ROOT / "voicebank" / "TETO-English-150401").rglob("presamp.ini"),
