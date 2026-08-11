@@ -56,6 +56,18 @@ def test_can_render_an_individual_metadata_section(tmp_path: Path) -> None:
     assert result.unit_id == unit.id
 
 
+def test_estimates_recorded_section_pitch_and_caches_it(tmp_path: Path) -> None:
+    _make_sine_bank(tmp_path)
+    unit = load_voicebank(tmp_path, use_cache=False).units[0]
+    renderer = VoicebankRenderer()
+
+    first = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
+    second = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
+
+    assert first == pytest.approx(222, abs=8)
+    assert second == first
+
+
 def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path) -> None:
     _make_sine_bank(tmp_path)
     unit = load_voicebank(tmp_path, use_cache=False).units[0]

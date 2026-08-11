@@ -48,6 +48,7 @@ class TimelineSegment:
     duration_cost: float
     transition_cost: float
     total_cost: float
+    pitch_ratio: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +308,7 @@ def recognize_wav(
     output_wav: str | Path | None = None,
     output_sample_rate: int | None = None,
     pitch_ratio: float = 1.0,
+    track_pitch: bool = True,
     output_gain: float = 1.0,
     analysis_config: AnalysisConfig | None = None,
     match_weights: MatchWeights | None = None,
@@ -332,6 +334,7 @@ def recognize_wav(
             recognizer.bank,
             output_sample_rate=output_sample_rate,
             pitch_ratio=pitch_ratio,
+            track_pitch=track_pitch,
             output_gain=output_gain,
         )
         result.write_wav(output_wav)
@@ -363,6 +366,7 @@ def _timeline_segment(
         segment.duration_cost,
         segment.transition_cost,
         segment.total_cost,
+        segment.pitch_ratio,
     )
 
 

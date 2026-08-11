@@ -67,6 +67,7 @@ class DecodedSegment:
     duration_cost: float
     transition_cost: float
     total_cost: float
+    pitch_ratio: float = 1.0
 
     @property
     def is_silence(self) -> bool:

@@ -143,10 +143,11 @@ synthstream-recognize human.wav voicebank/my-bank `
 ```
 
 The renderer selects each timeline segment's real OTO unit and section, stretches it to the
-detected duration, resamples voicebank recordings to one output rate, and writes actual
-voicebank audio. Silence entries remain silence. The default output rate is the first loaded
-voicebank unit's sample rate; `--output-sample-rate` can override it. `--pitch-ratio` applies a
-single global pitch ratio while per-phone pitch transfer remains future work.
+detected duration, transfers the input's voiced F0 onto that section, resamples voicebank
+recordings to one output rate, and writes actual voicebank audio. Silence and unvoiced
+regions remain unforced. The default output rate is the first loaded voicebank unit's sample
+rate; `--output-sample-rate` can override it. `--pitch-ratio` remains available as a global
+multiplier on top of the per-section pitch transfer.
 
 The production path uses a wav2vec2 IPA CTC model to detect phones directly from the
 waveform. It does not recognize words and does not invoke a pronunciation dictionary or
@@ -228,7 +229,9 @@ short rolling windows with the wav2vec2 direct-IPA frontend, plans aliases again
 voicebank profile, renders committed OTO sections, and queues output audio. For an unsupported
 bank, pass `use_direct_ipa=False` to explicitly select the lower-accuracy acoustic fallback.
 `start(background=False)` plus `process_available()` provides a deterministic worker-free mode
-for tests and integrations that own their processing loop.
+for tests and integrations that own their processing loop. Direct mode estimates the current
+voiced F0 and applies a bounded per-section pitch ratio; set `track_pitch=False` when an
+integration needs the fixed global `pitch_ratio` only.
 
 ## Desktop GUI
 

@@ -1,7 +1,13 @@
 import numpy as np
 import pytest
 
-from synthstream.analysis import AnalysisConfig, FeatureExtractor
+from synthstream.analysis import (
+    AnalysisConfig,
+    FeatureExtractor,
+    bounded_pitch_ratio,
+    estimate_fast_f0_hz,
+    estimate_median_f0_hz,
+)
 
 SAMPLE_RATE = 16_000
 
@@ -33,6 +39,16 @@ def test_yin_pitch_tracks_tone_and_keeps_f0_out_of_recognition_features() -> Non
     assert np.nanmedian(high.f0_hz) == pytest.approx(440, abs=4)
     assert np.mean(low.periodicity) > 0.8
     assert low.recognition_features.shape == high.recognition_features.shape
+
+
+def test_pitch_helpers_track_tone_and_bound_transfer_ratio() -> None:
+    tone = _tone(220)
+
+    assert estimate_median_f0_hz(tone, SAMPLE_RATE) == pytest.approx(220, abs=2)
+    assert estimate_fast_f0_hz(tone, SAMPLE_RATE) == pytest.approx(222, abs=4)
+    assert bounded_pitch_ratio(880, 220) == pytest.approx(2.0)
+    assert bounded_pitch_ratio(30, 220) == pytest.approx(0.5)
+    assert bounded_pitch_ratio(None, 220) == 1.0
 
 
 def test_silence_is_unvoiced_and_has_no_f0() -> None:
@@ -115,4 +131,3 @@ def test_rejects_invalid_analysis_configuration(configuration: dict[str, float])
 def test_rejects_audio_with_invalid_shape() -> None:
     with pytest.raises(ValueError):
         FeatureExtractor().analyze(np.zeros((10, 0), dtype=np.float32))
-

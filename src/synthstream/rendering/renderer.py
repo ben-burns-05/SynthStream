@@ -11,6 +11,7 @@ import torch
 import torchaudio.functional as audio_functional  # type: ignore[import-untyped]
 from scipy.signal import resample  # type: ignore[import-untyped]
 
+from synthstream.analysis import estimate_fast_f0_hz
 from synthstream.audio.output import AudioSamples, AudioSink
 from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
 
@@ -39,6 +40,30 @@ class VoicebankRenderer:
         if not math.isfinite(output_gain) or output_gain < 0:
             raise ValueError("output_gain must be finite and non-negative")
         self.output_gain = output_gain
+        self._section_pitch_cache: dict[tuple[str, int, int], float | None] = {}
+
+    def estimate_section_pitch_hz(
+        self, unit: VoicebankUnit, section: VoicebankSection
+    ) -> float | None:
+        """Estimate and cache the recorded F0 for one voicebank section."""
+        if section not in unit.sections:
+            raise ValueError("section does not belong to the supplied unit")
+        key = (unit.id, section.start_sample, section.end_sample)
+        if key not in self._section_pitch_cache:
+            waveform, file_sample_rate = sf.read(
+                unit.wav_path,
+                start=section.start_sample,
+                stop=section.end_sample,
+                dtype="float32",
+                always_2d=True,
+            )
+            if file_sample_rate != unit.sample_rate:
+                raise ValueError("WAV sample rate changed after voicebank loading")
+            mono = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
+            self._section_pitch_cache[key] = estimate_fast_f0_hz(
+                mono, unit.sample_rate
+            )
+        return self._section_pitch_cache[key]
 
     def render_unit(
         self,
