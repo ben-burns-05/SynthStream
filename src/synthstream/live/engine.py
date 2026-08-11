@@ -22,17 +22,16 @@ from synthstream.audio import DuplexAudioBackend, RealtimeAudioStream
 from synthstream.decoding import DecodedSegment, DecoderConfig, SegmentalBeamDecoder
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
 from synthstream.offline.direct_phonemes import (
-    DetectedPhone,
     DirectAliasPlanner,
     DirectIPARecognizer,
     DirectPlannedAlias,
 )
-from synthstream.offline.recognizer import _phone_aware_section_boundaries
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.rendering import (
+    AliasEvent,
     BufferedOverlapComposer,
     VoicebankRenderer,
-    rebalance_section_durations,
+    allocate_alias_section_durations,
 )
 from synthstream.voicebank import Voicebank, VoicebankUnit, load_voicebank
 
@@ -490,7 +489,6 @@ class LiveVoicebankEngine:
         )
         segments = self._direct_segments(
             recognition.aliases,
-            shifted_phones,
             cutoff,
             pitch_audio=window,
             pitch_audio_start_samples=window_start_samples,
@@ -503,7 +501,6 @@ class LiveVoicebankEngine:
     def _direct_segments(
         self,
         aliases: tuple[DirectPlannedAlias, ...],
-        phones: tuple[DetectedPhone, ...],
         cutoff_seconds: float,
         *,
         pitch_audio: AudioSamples | None = None,
@@ -535,24 +532,34 @@ class LiveVoicebankEngine:
                 )
             start_frame = max(0, round(effective_start_seconds / hop_seconds))
             end_frame = max(start_frame + 1, round(alias.end_seconds / hop_seconds))
-            boundaries = _phone_aware_section_boundaries(
-                alias,
-                phones,
-                start_frame,
-                end_frame,
-                hop_seconds,
+            pitch_ratio = 1.0
+            if self.track_pitch and pitch_audio is not None:
+                reference_section = next(
+                    (
+                        section
+                        for section in alias.unit.sections
+                        if section.kind == "sustain"
+                    ),
+                    alias.unit.sections[-1],
+                )
+                source_f0 = self.renderer.estimate_section_pitch_hz(
+                    alias.unit, reference_section
+                )
+                pitch_ratio = bounded_pitch_ratio(target_f0, source_f0)
+            event = AliasEvent(
+                unit_id=alias.unit.id,
+                alias=alias.alias,
+                start_seconds=start_frame * hop_seconds,
+                end_seconds=end_frame * hop_seconds,
+                confidence=max(alias.confidence, 1e-6),
+                pitch_ratio=pitch_ratio,
             )
-            section_frames = rebalance_section_durations(
-                alias.unit.sections,
-                tuple(
-                    right - left
-                    for left, right in zip(
-                        boundaries[:-1], boundaries[1:], strict=True
-                    )
-                ),
-                sample_rate=self.extractor.config.sample_rate,
+            section_frames = allocate_alias_section_durations(
+                event,
+                alias.unit,
+                timebase_hz=1.0 / hop_seconds,
             )
-            boundaries = [boundaries[0]]
+            boundaries = [start_frame]
             for frame_count in section_frames:
                 boundaries.append(boundaries[-1] + frame_count)
             confidence = max(alias.confidence, 1e-6)
@@ -566,12 +573,6 @@ class LiveVoicebankEngine:
                     1,
                     round(alias.unit.sections[section_index].duration_seconds / hop_seconds),
                 )
-                pitch_ratio = 1.0
-                if self.track_pitch and pitch_audio is not None:
-                    source_f0 = self.renderer.estimate_section_pitch_hz(
-                        alias.unit, alias.unit.sections[section_index]
-                    )
-                    pitch_ratio = bounded_pitch_ratio(target_f0, source_f0)
                 segments.append(
                     DecodedSegment(
                         alias.unit.id,
@@ -585,7 +586,7 @@ class LiveVoicebankEngine:
                         0.0,
                         0.0,
                         section_cost,
-                        pitch_ratio,
+                        event.pitch_ratio,
                     )
                 )
             self._direct_emitted_seconds = max(self._direct_emitted_seconds, alias.end_seconds)

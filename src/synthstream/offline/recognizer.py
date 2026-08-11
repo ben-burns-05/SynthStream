@@ -28,6 +28,7 @@ from synthstream.offline.direct_phonemes import (
     DirectPlannedAlias,
 )
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
+from synthstream.rendering import AliasEvent, allocate_alias_section_durations
 from synthstream.voicebank import Voicebank, load_voicebank
 
 
@@ -242,14 +243,22 @@ class OfflineRecognizer:
                 continue
             if segments and start_frame > segments[-1].end_frame:
                 segments.append(_silence_segment(segments[-1].end_frame, start_frame))
-            boundaries = _phone_aware_section_boundaries(
-                planned,
-                recognition.phones,
-                start_frame,
-                end_frame,
-                hop_seconds,
+            event = AliasEvent(
+                unit_id=planned.unit.id,
+                alias=planned.alias,
+                start_seconds=start_frame * hop_seconds,
+                end_seconds=end_frame * hop_seconds,
+                confidence=max(planned.confidence, 1e-6),
             )
-            section_cost = -math.log(max(planned.confidence, 1e-6)) / len(planned.unit.sections)
+            section_frames = allocate_alias_section_durations(
+                event,
+                planned.unit,
+                timebase_hz=1.0 / hop_seconds,
+            )
+            boundaries = [start_frame]
+            for frame_count_for_section in section_frames:
+                boundaries.append(boundaries[-1] + frame_count_for_section)
+            section_cost = -math.log(event.confidence) / len(planned.unit.sections)
             for section_index, (section, section_start, section_end) in enumerate(
                 zip(planned.unit.sections, boundaries[:-1], boundaries[1:], strict=True)
             ):

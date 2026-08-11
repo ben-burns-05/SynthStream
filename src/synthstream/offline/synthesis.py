@@ -14,9 +14,10 @@ from scipy.signal import resample_poly  # type: ignore[import-untyped]
 from synthstream.analysis import bounded_pitch_ratio, estimate_quantized_pitch_hz
 from synthstream.offline.recognizer import RecognitionTimeline, TimelineSegment
 from synthstream.rendering import (
+    AliasEvent,
     BufferedOverlapComposer,
     VoicebankRenderer,
-    rebalance_section_durations,
+    allocate_alias_section_durations,
 )
 from synthstream.voicebank import Voicebank, VoicebankUnit
 
@@ -230,14 +231,17 @@ def _rebalance_timeline_sections(
             index = cursor
             continue
         start_sample = round(group[0].start_seconds * sample_rate)
-        target_samples = tuple(
-            max(1, round((item.end_seconds - item.start_seconds) * sample_rate))
-            for item in group
+        event = AliasEvent(
+            unit_id=unit.id,
+            alias=segment.alias or unit.alias,
+            start_seconds=group[0].start_seconds,
+            end_seconds=group[-1].end_seconds,
+            pitch_ratio=group[0].pitch_ratio,
         )
-        durations = rebalance_section_durations(
-            unit.sections,
-            target_samples,
-            sample_rate=sample_rate,
+        durations = allocate_alias_section_durations(
+            event,
+            unit,
+            timebase_hz=sample_rate,
         )
         current = start_sample
         for item, duration, section in zip(group, durations, unit.sections, strict=True):

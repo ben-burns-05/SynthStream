@@ -7,7 +7,12 @@ import pytest
 import soundfile as sf
 
 from synthstream.audio import WavFileSink
-from synthstream.rendering import VoicebankRenderer, rebalance_section_durations
+from synthstream.rendering import (
+    AliasEvent,
+    VoicebankRenderer,
+    allocate_alias_section_durations,
+    rebalance_section_durations,
+)
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -79,9 +84,19 @@ def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path
     )
 
     assert sum(durations) == 12_000
-    assert durations[0] == 1_000
-    assert durations[1] == 3_000
-    assert durations[2] == 8_000
+    assert durations[0] == 800
+    assert durations[1] == 2_400
+    assert durations[2] == 8_800
+
+
+def test_alias_event_allocates_only_sustain_time(tmp_path: Path) -> None:
+    _make_sine_bank(tmp_path)
+    unit = load_voicebank(tmp_path, use_cache=False).units[0]
+    event = AliasEvent(unit.id, unit.alias, 0.0, 0.75)
+
+    durations = allocate_alias_section_durations(event, unit, timebase_hz=SAMPLE_RATE)
+
+    assert durations == (800, 2_400, 8_800)
 
 
 def test_result_writes_to_wav_output_sink(tmp_path: Path) -> None:
