@@ -162,3 +162,90 @@ def _time_stretch(samples: AudioSamples, target_samples: int) -> AudioSamples:
 
 def _largest_power_of_two(value: int) -> int:
     return 1 << (value.bit_length() - 1)
+
+
+def rebalance_section_durations(
+    sections: tuple[VoicebankSection, ...],
+    target_samples: tuple[int, ...],
+    *,
+    sample_rate: int,
+    transient_min_ratio: float = 0.75,
+    transient_max_ratio: float = 1.25,
+) -> tuple[int, ...]:
+    """Keep attacks near source duration and assign excess time to sustain.
+
+    The returned durations preserve the original total duration.  Onset and
+    transition sections are clamped to a moderate stretch range; sustain
+    receives the remaining samples.  This prevents short transients from
+    being phase-vocoder-stretched by several hundred percent.
+    """
+    if len(sections) != len(target_samples):
+        raise ValueError("sections and target_samples must have equal length")
+    if sample_rate <= 0 or not sections:
+        raise ValueError("sample_rate and sections must be positive")
+    if not 0 < transient_min_ratio <= transient_max_ratio:
+        raise ValueError("transient stretch bounds are invalid")
+    total = max(len(sections), sum(max(1, int(value)) for value in target_samples))
+    nominal = tuple(
+        max(1, round(section.duration_seconds * sample_rate)) for section in sections
+    )
+    transients = tuple(
+        index
+        for index, section in enumerate(sections)
+        if section.kind in {"onset", "transition"}
+    )
+    sustains = tuple(
+        index for index, section in enumerate(sections) if section.kind == "sustain"
+    )
+    if not transients or not sustains:
+        return _proportional_durations(total, target_samples)
+
+    protected = [0] * len(sections)
+    for index in transients:
+        lower = max(1, round(nominal[index] * transient_min_ratio))
+        upper = max(lower, round(nominal[index] * transient_max_ratio))
+        protected[index] = min(upper, max(lower, int(target_samples[index])))
+
+    available_for_transients = max(len(transients), total - len(sustains))
+    if sum(protected) > available_for_transients:
+        scaled = _proportional_durations(
+            available_for_transients, tuple(protected[index] for index in transients)
+        )
+        for index, value in zip(transients, scaled, strict=True):
+            protected[index] = value
+
+    remaining = total - sum(protected)
+    sustain_weights = tuple(max(1, int(target_samples[index])) for index in sustains)
+    sustain_durations = _proportional_durations(remaining, sustain_weights)
+    for index, value in zip(sustains, sustain_durations, strict=True):
+        protected[index] = value
+    return tuple(protected)
+
+
+def _proportional_durations(total: int, weights: tuple[int, ...]) -> tuple[int, ...]:
+    if not weights:
+        return ()
+    total = max(len(weights), int(total))
+    weight_sum = max(1, sum(max(1, value) for value in weights))
+    raw = [total * max(1, value) / weight_sum for value in weights]
+    result = [max(1, int(value)) for value in raw]
+    remainder = total - sum(result)
+    order = sorted(
+        range(len(weights)),
+        key=lambda index: raw[index] - int(raw[index]),
+        reverse=True,
+    )
+    while remainder > 0:
+        for index in order:
+            if remainder <= 0:
+                break
+            result[index] += 1
+            remainder -= 1
+    while remainder < 0:
+        for index in reversed(order):
+            if remainder >= 0:
+                break
+            if result[index] > 1:
+                result[index] -= 1
+                remainder += 1
+    return tuple(result)

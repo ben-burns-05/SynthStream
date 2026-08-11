@@ -7,7 +7,7 @@ import pytest
 import soundfile as sf
 
 from synthstream.audio import WavFileSink
-from synthstream.rendering import VoicebankRenderer
+from synthstream.rendering import VoicebankRenderer, rebalance_section_durations
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -54,6 +54,22 @@ def test_can_render_an_individual_metadata_section(tmp_path: Path) -> None:
     assert len(result.samples) == 1_600
     assert result.source_duration_seconds == pytest.approx(0.05)
     assert result.unit_id == unit.id
+
+
+def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path) -> None:
+    _make_sine_bank(tmp_path)
+    unit = load_voicebank(tmp_path, use_cache=False).units[0]
+
+    durations = rebalance_section_durations(
+        unit.sections,
+        (4_000, 4_000, 4_000),
+        sample_rate=SAMPLE_RATE,
+    )
+
+    assert sum(durations) == 12_000
+    assert durations[0] == 1_000
+    assert durations[1] == 3_000
+    assert durations[2] == 8_000
 
 
 def test_result_writes_to_wav_output_sink(tmp_path: Path) -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +12,11 @@ import soundfile as sf  # type: ignore[import-untyped]
 from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
 from synthstream.offline.recognizer import RecognitionTimeline, TimelineSegment
-from synthstream.rendering import BufferedOverlapComposer, VoicebankRenderer
+from synthstream.rendering import (
+    BufferedOverlapComposer,
+    VoicebankRenderer,
+    rebalance_section_durations,
+)
 from synthstream.voicebank import Voicebank, VoicebankUnit
 
 AudioSamples = npt.NDArray[np.float32]
@@ -72,7 +76,8 @@ def synthesize_timeline(
     previous_unit_id: str | None = None
     onset_stretch_by_unit: dict[str, float] = {}
 
-    for segment in timeline.segments:
+    segments = _rebalance_timeline_sections(timeline.segments, units, output_sample_rate)
+    for segment in segments:
         start = min(total_samples, max(0, round(segment.start_seconds * output_sample_rate)))
         end = min(total_samples, max(start, round(segment.end_seconds * output_sample_rate)))
         if end <= start:
@@ -151,6 +156,12 @@ def _overlap_samples(
 ) -> int:
     """Return warped OTO overlap for a transition into a new alias unit."""
     unit_id = unit.id
+    if (
+        previous_unit_id == unit_id
+        and segment.section_index is not None
+        and segment.section_index > 0
+    ):
+        return min(target_samples, round(0.005 * sample_rate))
     if previous_unit_id is None or previous_unit_id == unit_id:
         return 0
     overlap_ms = max(0.0, unit.overlap_ms)
@@ -160,6 +171,69 @@ def _overlap_samples(
     if segment.section_kind == "onset":
         stretch = max(segment.stretch_ratio, 1e-6)
     return min(target_samples, max(0, round(overlap_ms * sample_rate / 1000.0 * stretch)))
+
+
+def _rebalance_timeline_sections(
+    segments: tuple[TimelineSegment, ...],
+    units: dict[str, VoicebankUnit],
+    sample_rate: int,
+) -> tuple[TimelineSegment, ...]:
+    """Reallocate alias timing so transients stay close to source duration."""
+    result: list[TimelineSegment] = []
+    index = 0
+    while index < len(segments):
+        segment = segments[index]
+        if segment.silence or segment.unit_id is None or segment.section_index != 0:
+            result.append(segment)
+            index += 1
+            continue
+        unit = units.get(segment.unit_id)
+        if unit is None:
+            result.append(segment)
+            index += 1
+            continue
+        group = [segment]
+        cursor = index + 1
+        while cursor < len(segments):
+            candidate = segments[cursor]
+            if (
+                candidate.silence
+                or candidate.unit_id != segment.unit_id
+                or candidate.alias != segment.alias
+                or candidate.section_index != len(group)
+            ):
+                break
+            group.append(candidate)
+            cursor += 1
+        if len(group) != len(unit.sections):
+            result.extend(group)
+            index = cursor
+            continue
+        start_sample = round(group[0].start_seconds * sample_rate)
+        target_samples = tuple(
+            max(1, round((item.end_seconds - item.start_seconds) * sample_rate))
+            for item in group
+        )
+        durations = rebalance_section_durations(
+            unit.sections,
+            target_samples,
+            sample_rate=sample_rate,
+        )
+        current = start_sample
+        for item, duration, section in zip(group, durations, unit.sections, strict=True):
+            next_sample = current + duration
+            result.append(
+                replace(
+                    item,
+                    start_seconds=current / sample_rate,
+                    end_seconds=next_sample / sample_rate,
+                    duration_seconds=duration / sample_rate,
+                    stretch_ratio=(duration / sample_rate) / section.duration_seconds,
+                )
+            )
+            current = next_sample
+        index = cursor
+    return tuple(result)
 
 
 def _default_sample_rate(bank: Voicebank) -> int:

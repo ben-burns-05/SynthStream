@@ -24,7 +24,11 @@ from synthstream.offline.direct_phonemes import (
 )
 from synthstream.offline.recognizer import _phone_aware_section_boundaries
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
-from synthstream.rendering import BufferedOverlapComposer, VoicebankRenderer
+from synthstream.rendering import (
+    BufferedOverlapComposer,
+    VoicebankRenderer,
+    rebalance_section_durations,
+)
 from synthstream.voicebank import Voicebank, VoicebankUnit, load_voicebank
 
 AudioSamples = npt.NDArray[np.float32]
@@ -82,6 +86,7 @@ class LiveVoicebankEngine:
         direct_silence_rms_threshold: float = 0.00005,
         direct_utterance_seconds: float = 6.0,
         direct_context_padding_seconds: float = 0.2,
+        internal_section_crossfade_ms: float = 5.0,
         diagnostic_input_seconds: float = 10.0,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
@@ -101,6 +106,7 @@ class LiveVoicebankEngine:
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
             (direct_utterance_seconds, "direct_utterance_seconds"),
             (direct_context_padding_seconds, "direct_context_padding_seconds"),
+            (internal_section_crossfade_ms, "internal_section_crossfade_ms"),
             (diagnostic_input_seconds, "diagnostic_input_seconds"),
         ):
             if not math.isfinite(value) or value <= 0:
@@ -147,6 +153,9 @@ class LiveVoicebankEngine:
         self.direct_utterance_samples = max(1, round(direct_utterance_seconds * sample_rate))
         self.direct_context_padding_samples = max(
             1, round(direct_context_padding_seconds * sample_rate)
+        )
+        self.internal_section_crossfade_samples = max(
+            0, round(internal_section_crossfade_ms * sample_rate / 1000.0)
         )
         self.diagnostic_input_samples = max(1, round(diagnostic_input_seconds * sample_rate))
         self._units = {unit.id: unit for unit in bank.units}
@@ -501,6 +510,19 @@ class LiveVoicebankEngine:
                 end_frame,
                 hop_seconds,
             )
+            section_frames = rebalance_section_durations(
+                alias.unit.sections,
+                tuple(
+                    right - left
+                    for left, right in zip(
+                        boundaries[:-1], boundaries[1:], strict=True
+                    )
+                ),
+                sample_rate=self.extractor.config.sample_rate,
+            )
+            boundaries = [boundaries[0]]
+            for frame_count in section_frames:
+                boundaries.append(boundaries[-1] + frame_count)
             confidence = max(alias.confidence, 1e-6)
             section_cost = -math.log(confidence) / len(alias.unit.sections)
             for section_index, (section_start, section_end) in enumerate(
@@ -599,6 +621,12 @@ class LiveVoicebankEngine:
         target_samples: int,
     ) -> int:
         unit_id = unit.id
+        if (
+            self._previous_rendered_unit_id == unit_id
+            and segment.section_index is not None
+            and segment.section_index > 0
+        ):
+            return min(target_samples, self.internal_section_crossfade_samples)
         if self._previous_rendered_unit_id in (None, unit_id):
             return 0
         overlap_ms = max(0.0, unit.overlap_ms)
