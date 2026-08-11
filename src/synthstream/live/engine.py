@@ -16,7 +16,7 @@ from synthstream.analysis import (
     AnalysisConfig,
     FeatureExtractor,
     bounded_pitch_ratio,
-    estimate_fast_f0_hz,
+    estimate_quantized_pitch_hz,
 )
 from synthstream.audio import DuplexAudioBackend, RealtimeAudioStream
 from synthstream.decoding import DecodedSegment, DecoderConfig, SegmentalBeamDecoder
@@ -529,7 +529,7 @@ class LiveVoicebankEngine:
                 alias_end_sample = max(
                     alias_start_sample, min(len(pitch_audio), alias_end_sample)
                 )
-                target_f0 = estimate_fast_f0_hz(
+                target_f0 = estimate_quantized_pitch_hz(
                     pitch_audio[alias_start_sample:alias_end_sample],
                     self.extractor.config.sample_rate,
                 )

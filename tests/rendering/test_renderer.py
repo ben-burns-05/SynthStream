@@ -64,7 +64,7 @@ def test_estimates_recorded_section_pitch_and_caches_it(tmp_path: Path) -> None:
     first = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
     second = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
 
-    assert first == pytest.approx(222, abs=8)
+    assert first == pytest.approx(220, abs=0.1)
     assert second == first
 
 

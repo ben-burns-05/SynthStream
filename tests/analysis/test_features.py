@@ -7,6 +7,8 @@ from synthstream.analysis import (
     bounded_pitch_ratio,
     estimate_fast_f0_hz,
     estimate_median_f0_hz,
+    estimate_quantized_pitch_hz,
+    quantize_pitch_hz,
 )
 
 SAMPLE_RATE = 16_000
@@ -49,6 +51,14 @@ def test_pitch_helpers_track_tone_and_bound_transfer_ratio() -> None:
     assert bounded_pitch_ratio(880, 220) == pytest.approx(2.0)
     assert bounded_pitch_ratio(30, 220) == pytest.approx(0.5)
     assert bounded_pitch_ratio(None, 220) == 1.0
+
+
+def test_aubio_pitch_estimate_snaps_to_nearest_equal_tempered_note() -> None:
+    tone = _tone(220)
+
+    assert estimate_quantized_pitch_hz(tone, SAMPLE_RATE) == pytest.approx(220, abs=0.1)
+    assert quantize_pitch_hz(230) == pytest.approx(233.08, abs=0.1)
+    assert estimate_quantized_pitch_hz(np.zeros_like(tone), SAMPLE_RATE) is None
 
 
 def test_silence_is_unvoiced_and_has_no_f0() -> None:

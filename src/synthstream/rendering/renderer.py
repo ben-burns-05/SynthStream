@@ -11,7 +11,7 @@ import torch
 import torchaudio.functional as audio_functional  # type: ignore[import-untyped]
 from scipy.signal import resample  # type: ignore[import-untyped]
 
-from synthstream.analysis import estimate_fast_f0_hz
+from synthstream.analysis import estimate_quantized_pitch_hz
 from synthstream.audio.output import AudioSamples, AudioSink
 from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
 
@@ -60,7 +60,7 @@ class VoicebankRenderer:
             if file_sample_rate != unit.sample_rate:
                 raise ValueError("WAV sample rate changed after voicebank loading")
             mono = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
-            self._section_pitch_cache[key] = estimate_fast_f0_hz(
+            self._section_pitch_cache[key] = estimate_quantized_pitch_hz(
                 mono, unit.sample_rate
             )
         return self._section_pitch_cache[key]

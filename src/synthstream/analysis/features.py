@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import aubio  # type: ignore[import-untyped]
 import numpy as np
 import numpy.typing as npt
 
@@ -232,6 +233,57 @@ def estimate_fast_f0_hz(
     if confidence < 0.2:
         return None
     return float(sample_rate / lag)
+
+
+def estimate_quantized_pitch_hz(
+    samples: npt.ArrayLike,
+    sample_rate: int,
+    *,
+    minimum_f0_hz: float = 60.0,
+    maximum_f0_hz: float = 500.0,
+    confidence_threshold: float = 0.55,
+) -> float | None:
+    """Estimate one alias F0 with aubio and snap it to the nearest note."""
+    if sample_rate < 1:
+        raise ValueError("sample_rate must be positive")
+    if not 0 < minimum_f0_hz < maximum_f0_hz < sample_rate / 2:
+        raise ValueError("F0 bounds must lie between zero and Nyquist")
+    if not 0 <= confidence_threshold <= 1:
+        raise ValueError("confidence_threshold must lie between zero and one")
+    mono = _as_mono(samples)
+    if not len(mono):
+        return None
+
+    hop_size = max(1, round(0.01 * sample_rate))
+    buffer_size = 1 << max(9, (max(hop_size * 4, 1) - 1).bit_length())
+    detector = aubio.pitch("yin", buffer_size, hop_size, sample_rate)
+    detector.set_unit("Hz")
+    detector.set_silence(-40.0)
+    detector.set_tolerance(0.8)
+    values: list[float] = []
+    for start in range(0, len(mono), hop_size):
+        frame = mono[start : start + hop_size]
+        if len(frame) < hop_size:
+            frame = np.pad(frame, (0, hop_size - len(frame)))
+        frequency = float(detector(frame)[0])
+        confidence = float(detector.get_confidence())
+        if (
+            confidence >= confidence_threshold
+            and minimum_f0_hz <= frequency <= maximum_f0_hz
+        ):
+            values.append(frequency)
+    if not values:
+        return None
+    return quantize_pitch_hz(float(np.median(np.asarray(values, dtype=np.float32))))
+
+
+def quantize_pitch_hz(frequency_hz: float) -> float:
+    """Snap a frequency to the nearest equal-tempered note at A4 = 440 Hz."""
+    if not np.isfinite(frequency_hz) or frequency_hz <= 0:
+        raise ValueError("frequency_hz must be finite and positive")
+    midi_note = 69.0 + 12.0 * np.log2(frequency_hz / 440.0)
+    nearest_note = int(np.floor(midi_note + 0.5))
+    return float(440.0 * np.power(2.0, (nearest_note - 69) / 12.0))
 
 
 def bounded_pitch_ratio(

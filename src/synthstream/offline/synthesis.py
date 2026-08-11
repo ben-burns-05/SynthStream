@@ -11,12 +11,7 @@ import numpy.typing as npt
 import soundfile as sf  # type: ignore[import-untyped]
 from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
-from synthstream.analysis import (
-    AnalysisConfig,
-    FeatureExtractor,
-    bounded_pitch_ratio,
-    median_f0_hz,
-)
+from synthstream.analysis import bounded_pitch_ratio, estimate_quantized_pitch_hz
 from synthstream.offline.recognizer import RecognitionTimeline, TimelineSegment
 from synthstream.rendering import (
     BufferedOverlapComposer,
@@ -70,11 +65,6 @@ def synthesize_timeline(
     units = {unit.id: unit for unit in bank.units}
     renderer = VoicebankRenderer(output_gain=output_gain)
     input_audio = _load_timeline_audio(timeline) if track_pitch else None
-    input_pitch_batch = (
-        FeatureExtractor(AnalysisConfig(sample_rate=timeline.sample_rate)).analyze(input_audio)
-        if input_audio is not None
-        else None
-    )
     total_samples = max(1, round(timeline.input_duration_seconds * output_sample_rate))
     # Offline output can keep the whole timeline mutable until the final WAV
     # is assembled; the live engine uses a short staging window instead.
@@ -128,7 +118,7 @@ def synthesize_timeline(
         if segment.section_kind == "onset":
             onset_stretch_by_unit[unit.id] = max(segment.stretch_ratio, 1e-6)
         segment_pitch_ratio = segment.pitch_ratio
-        if input_audio is not None and input_pitch_batch is not None:
+        if input_audio is not None:
             input_start = min(
                 len(input_audio), max(0, round(segment.start_seconds * timeline.sample_rate))
             )
@@ -136,10 +126,9 @@ def synthesize_timeline(
                 len(input_audio),
                 max(input_start, round(segment.end_seconds * timeline.sample_rate)),
             )
-            target_f0 = median_f0_hz(
-                input_pitch_batch,
-                start_seconds=input_start / timeline.sample_rate,
-                end_seconds=input_end / timeline.sample_rate,
+            target_f0 = estimate_quantized_pitch_hz(
+                input_audio[input_start:input_end],
+                timeline.sample_rate,
             )
             source_f0 = renderer.estimate_section_pitch_hz(
                 unit, unit.sections[segment.section_index]
