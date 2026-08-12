@@ -90,7 +90,6 @@ class LiveVoicebankEngine:
         direct_silence_rms_threshold: float = 0.00005,
         direct_utterance_seconds: float = 6.0,
         direct_context_padding_seconds: float = 0.2,
-        internal_section_crossfade_ms: float = 5.0,
         diagnostic_input_seconds: float = 10.0,
     ) -> None:
         config = analysis_config or AnalysisConfig(sample_rate=sample_rate)
@@ -110,7 +109,6 @@ class LiveVoicebankEngine:
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
             (direct_utterance_seconds, "direct_utterance_seconds"),
             (direct_context_padding_seconds, "direct_context_padding_seconds"),
-            (internal_section_crossfade_ms, "internal_section_crossfade_ms"),
             (diagnostic_input_seconds, "diagnostic_input_seconds"),
         ):
             if not math.isfinite(value) or value <= 0:
@@ -166,7 +164,6 @@ class LiveVoicebankEngine:
             self.renderer,
             sample_rate,
             staging_seconds=0.12,
-            internal_section_crossfade_ms=internal_section_crossfade_ms,
         )
         self._pending_input = np.empty(0, dtype=np.float32)
         self._direct_audio = np.empty(0, dtype=np.float32)

@@ -59,18 +59,12 @@ class VoicebankRenderScheduler:
         output_sample_rate: int,
         *,
         staging_seconds: float = 0.0,
-        internal_section_crossfade_ms: float = 5.0,
     ) -> None:
         if output_sample_rate <= 0:
             raise ValueError("output_sample_rate must be positive")
-        if not math.isfinite(internal_section_crossfade_ms) or internal_section_crossfade_ms < 0:
-            raise ValueError("internal_section_crossfade_ms must be finite and non-negative")
         self.units = {unit.id: unit for unit in bank.units}
         self.renderer = renderer
         self.output_sample_rate = output_sample_rate
-        self.internal_section_crossfade_samples = round(
-            internal_section_crossfade_ms * output_sample_rate / 1000.0
-        )
         self._composer = BufferedOverlapComposer(
             output_sample_rate,
             staging_seconds=staging_seconds,
@@ -157,13 +151,10 @@ class VoicebankRenderScheduler:
         segment: RenderSegment,
         target_samples: int,
     ) -> int:
-        if (
-            self._previous_unit_id == unit.id
-            and segment.section_index is not None
-            and segment.section_index > 0
-        ):
-            return min(target_samples, self.internal_section_crossfade_samples)
-        if self._previous_unit_id in (None, unit.id):
+        # Sections within one alias remain contiguous. OTO overlap belongs to
+        # the onset of every subsequent alias event, even when it reuses the
+        # same recording unit.
+        if segment.section_index != 0 or self._previous_unit_id is None:
             return 0
         overlap_ms = max(0.0, unit.overlap_ms)
         if overlap_ms <= 0:
