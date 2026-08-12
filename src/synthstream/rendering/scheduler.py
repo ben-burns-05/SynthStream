@@ -120,7 +120,7 @@ class VoicebankRenderScheduler:
                 self._onset_stretch_by_unit[unit.id] = max(segment.stretch_ratio, 1e-6)
             result = self.renderer.render_section(
                 unit,
-                unit.sections[segment.section_index or 0],
+                unit.section_at(segment.section_index or 0),
                 duration_seconds=(target_samples + overlap_samples) / self.output_sample_rate,
                 pitch_ratio=segment.pitch_ratio,
             )
@@ -143,8 +143,12 @@ class VoicebankRenderScheduler:
         if segment.unit_id is None or segment.section_index is None:
             raise ValueError("voiced segment is missing voicebank identity")
         unit = self.units.get(segment.unit_id)
-        if unit is None or not 0 <= segment.section_index < len(unit.sections):
+        if unit is None:
             raise ValueError("segment references an unavailable voicebank section")
+        try:
+            unit.section_at(segment.section_index)
+        except IndexError as error:
+            raise ValueError("segment references an unavailable voicebank section") from error
         return unit
 
     def _overlap_samples(

@@ -11,8 +11,8 @@ import numpy.typing as npt
 import soundfile as sf  # type: ignore[import-untyped]
 from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
-from synthstream.analysis import bounded_pitch_ratio, estimate_quantized_pitch_hz
 from synthstream.offline.recognizer import RecognitionTimeline, TimelineSegment
+from synthstream.pitch import PitchTransfer
 from synthstream.rendering import (
     AliasEvent,
     RenderSegment,
@@ -68,6 +68,7 @@ def synthesize_timeline(
     units = {unit.id: unit for unit in bank.units}
     renderer = VoicebankRenderer(output_gain=output_gain)
     input_audio = _load_timeline_audio(timeline) if track_pitch else None
+    pitch_transfer = PitchTransfer() if input_audio is not None else None
     total_samples = max(1, round(timeline.input_duration_seconds * output_sample_rate))
     scheduler = VoicebankRenderScheduler(
         bank,
@@ -80,25 +81,15 @@ def synthesize_timeline(
     overlap_count = 0
 
     segments = _rebalance_timeline_sections(timeline.segments, units, output_sample_rate)
-    for segment in segments:
-        segment_pitch_ratio = segment.pitch_ratio
-        unit = units.get(segment.unit_id) if segment.unit_id is not None else None
-        if input_audio is not None and unit is not None and segment.section_index is not None:
-            input_start = min(
-                len(input_audio), max(0, round(segment.start_seconds * timeline.sample_rate))
-            )
-            input_end = min(
-                len(input_audio),
-                max(input_start, round(segment.end_seconds * timeline.sample_rate)),
-            )
-            target_f0 = estimate_quantized_pitch_hz(
-                input_audio[input_start:input_end],
-                timeline.sample_rate,
-            )
-            source_f0 = renderer.estimate_section_pitch_hz(
-                unit, unit.sections[segment.section_index]
-            )
-            segment_pitch_ratio *= bounded_pitch_ratio(target_f0, source_f0)
+    alias_pitch_ratios = _alias_pitch_ratios(
+        segments,
+        input_audio,
+        timeline.sample_rate,
+        units,
+        pitch_transfer,
+    )
+    for segment, alias_pitch_ratio in zip(segments, alias_pitch_ratios, strict=True):
+        segment_pitch_ratio = segment.pitch_ratio * alias_pitch_ratio
         result = scheduler.append(
             RenderSegment(
                 unit_id=segment.unit_id,
@@ -208,6 +199,58 @@ def _rebalance_timeline_sections(
     return tuple(result)
 
 
+def _alias_pitch_ratios(
+    segments: tuple[TimelineSegment, ...],
+    input_audio: AudioSamples | None,
+    input_sample_rate: int,
+    units: dict[str, VoicebankUnit],
+    pitch_transfer: PitchTransfer | None,
+) -> tuple[float, ...]:
+    """Estimate one quantized pitch ratio for each contiguous alias event."""
+    ratios = [1.0] * len(segments)
+    if input_audio is None or pitch_transfer is None:
+        return tuple(ratios)
+    index = 0
+    while index < len(segments):
+        segment = segments[index]
+        if segment.silence or segment.unit_id is None:
+            index += 1
+            continue
+        unit = units.get(segment.unit_id)
+        if unit is None:
+            index += 1
+            continue
+        end = index + 1
+        while end < len(segments):
+            candidate = segments[end]
+            previous = segments[end - 1]
+            if (
+                candidate.silence
+                or candidate.unit_id != segment.unit_id
+                or candidate.alias != segment.alias
+                or candidate.section_index is None
+                or previous.section_index is None
+                or candidate.section_index != previous.section_index + 1
+            ):
+                break
+            end += 1
+        input_start = min(
+            len(input_audio), max(0, round(segment.start_seconds * input_sample_rate))
+        )
+        input_end = min(
+            len(input_audio),
+            max(input_start, round(segments[end - 1].end_seconds * input_sample_rate)),
+        )
+        ratio = pitch_transfer.ratio_for_alias(
+            input_audio[input_start:input_end],
+            input_sample_rate,
+            unit,
+        )
+        ratios[index:end] = [ratio] * (end - index)
+        index = end
+    return tuple(ratios)
+
+
 def _default_sample_rate(bank: Voicebank) -> int:
     if not bank.units:
         raise ValueError("cannot synthesize an empty voicebank")
@@ -215,7 +258,7 @@ def _default_sample_rate(bank: Voicebank) -> int:
 
 
 def _load_timeline_audio(timeline: RecognitionTimeline) -> AudioSamples | None:
-    """Load and normalize the source audio used for per-section pitch targets."""
+    """Load and normalize source audio used for alias-level pitch targets."""
     try:
         waveform, source_rate = sf.read(
             timeline.source_wav, dtype="float32", always_2d=True

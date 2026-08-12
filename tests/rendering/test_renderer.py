@@ -7,6 +7,7 @@ import pytest
 import soundfile as sf
 
 from synthstream.audio import WavFileSink
+from synthstream.pitch import PitchTransfer
 from synthstream.rendering import (
     AliasEvent,
     VoicebankRenderer,
@@ -30,6 +31,11 @@ def _dominant_frequency(samples: npt.NDArray[np.float32], sample_rate: int) -> f
     spectrum = np.abs(np.fft.rfft(windowed))
     frequencies = np.fft.rfftfreq(len(samples), 1 / sample_rate)
     return float(frequencies[np.argmax(spectrum)])
+
+
+def _tone(frequency: float, duration: float = 0.5) -> np.ndarray:
+    time = np.arange(round(SAMPLE_RATE * duration), dtype=np.float32) / SAMPLE_RATE
+    return (0.4 * np.sin(2 * np.pi * frequency * time)).astype(np.float32)
 
 
 def test_renders_real_voicebank_region_at_requested_duration_and_pitch(tmp_path: Path) -> None:
@@ -71,6 +77,21 @@ def test_estimates_recorded_section_pitch_and_caches_it(tmp_path: Path) -> None:
 
     assert first == pytest.approx(220, abs=0.1)
     assert second == first
+
+
+def test_pitch_transfer_uses_one_alias_reference_pitch(tmp_path: Path) -> None:
+    _make_sine_bank(tmp_path)
+    unit = load_voicebank(tmp_path, use_cache=False).units[0]
+
+    ratio = PitchTransfer().ratio_for_alias(
+        _tone(440.0, duration=0.4),
+        SAMPLE_RATE,
+        unit,
+    )
+
+    assert ratio == pytest.approx(2.0)
+    assert unit.pitch_reference_section.kind == "sustain"
+    assert unit.section_at(0) is unit.sections[0]
 
 
 def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path) -> None:

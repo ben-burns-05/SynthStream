@@ -148,7 +148,7 @@ onto that section, resamples voicebank
 recordings to one output rate, and writes actual voicebank audio. Silence and unvoiced
 regions remain unforced. The default output rate is the first loaded voicebank unit's sample
 rate; `--output-sample-rate` can override it. `--pitch-ratio` remains available as a global
-multiplier on top of the per-section pitch transfer.
+multiplier on top of the one-pitch-estimate-per-alias transfer.
 
 The production path uses a wav2vec2 IPA CTC model to detect phones directly from the
 waveform. It does not recognize words and does not invoke a pronunciation dictionary or
@@ -231,8 +231,8 @@ voicebank profile, renders committed OTO sections, and queues output audio. For 
 bank, pass `use_direct_ipa=False` to explicitly select the lower-accuracy acoustic fallback.
 `start(background=False)` plus `process_available()` provides a deterministic worker-free mode
 for tests and integrations that own their processing loop. Direct mode estimates the current
-voiced F0 per alias with aubio, snaps it to the nearest musical note, and applies a bounded
-per-section pitch ratio; set `track_pitch=False` when an
+voiced F0 once per alias with aubio, snaps it to the nearest musical note, and applies one
+bounded ratio to all sections of that alias; set `track_pitch=False` when an
 integration needs the fixed global `pitch_ratio` only.
 
 ## Desktop GUI

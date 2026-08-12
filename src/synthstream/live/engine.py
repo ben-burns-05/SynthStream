@@ -14,8 +14,6 @@ import numpy.typing as npt
 from synthstream.analysis import (
     AnalysisConfig,
     FeatureExtractor,
-    bounded_pitch_ratio,
-    estimate_quantized_pitch_hz,
 )
 from synthstream.audio import DuplexAudioBackend, RealtimeAudioStream
 from synthstream.decoding import DecodedSegment, DecoderConfig, SegmentalBeamDecoder
@@ -26,6 +24,7 @@ from synthstream.offline.direct_phonemes import (
     DirectPlannedAlias,
 )
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
+from synthstream.pitch import PitchTransfer
 from synthstream.rendering import (
     AliasEvent,
     RenderSegment,
@@ -143,6 +142,7 @@ class LiveVoicebankEngine:
             )
             self.streaming_decoder = self.decoder.stream(lookahead_frames=lookahead_frames)
         self.renderer = VoicebankRenderer(output_gain=output_gain)
+        self.pitch_transfer = PitchTransfer()
         self.stream = RealtimeAudioStream(
             backend,
             sample_rate=sample_rate,
@@ -510,7 +510,6 @@ class LiveVoicebankEngine:
             effective_start_seconds = max(alias.start_seconds, self._direct_emitted_seconds)
             if alias.end_seconds <= effective_start_seconds + 1e-6:
                 continue
-            target_f0 = None
             if self.track_pitch and pitch_audio is not None:
                 alias_start_sample = round(
                     effective_start_seconds * self.extractor.config.sample_rate
@@ -522,26 +521,15 @@ class LiveVoicebankEngine:
                 alias_end_sample = max(
                     alias_start_sample, min(len(pitch_audio), alias_end_sample)
                 )
-                target_f0 = estimate_quantized_pitch_hz(
-                    pitch_audio[alias_start_sample:alias_end_sample],
-                    self.extractor.config.sample_rate,
-                )
             start_frame = max(0, round(effective_start_seconds / hop_seconds))
             end_frame = max(start_frame + 1, round(alias.end_seconds / hop_seconds))
             pitch_ratio = 1.0
             if self.track_pitch and pitch_audio is not None:
-                reference_section = next(
-                    (
-                        section
-                        for section in alias.unit.sections
-                        if section.kind == "sustain"
-                    ),
-                    alias.unit.sections[-1],
+                pitch_ratio = self.pitch_transfer.ratio_for_alias(
+                    pitch_audio[alias_start_sample:alias_end_sample],
+                    self.extractor.config.sample_rate,
+                    alias.unit,
                 )
-                source_f0 = self.renderer.estimate_section_pitch_hz(
-                    alias.unit, reference_section
-                )
-                pitch_ratio = bounded_pitch_ratio(target_f0, source_f0)
             event = AliasEvent(
                 unit_id=alias.unit.id,
                 alias=alias.alias,
@@ -567,14 +555,14 @@ class LiveVoicebankEngine:
                     continue
                 nominal_frames = max(
                     1,
-                    round(alias.unit.sections[section_index].duration_seconds / hop_seconds),
+                    round(alias.unit.section_at(section_index).duration_seconds / hop_seconds),
                 )
                 segments.append(
                     DecodedSegment(
                         alias.unit.id,
                         alias.alias,
                         section_index,
-                        alias.unit.sections[section_index].kind,
+                        alias.unit.section_at(section_index).kind,
                         section_start,
                         section_end,
                         (section_end - section_start) / nominal_frames,
