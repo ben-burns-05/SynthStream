@@ -11,6 +11,13 @@ from synthstream.rendering.renderer import (
     VoicebankRenderer,
     rebalance_section_durations,
 )
+from synthstream.rendering.scheduler import (
+    RenderAppend,
+    RenderSegment,
+    VoicebankRenderScheduler,
+    fit_audio_length,
+    resample_audio,
+)
 
 __all__ = [
     "BufferedOverlapComposer",
@@ -20,4 +27,9 @@ __all__ = [
     "RenderResult",
     "VoicebankRenderer",
     "rebalance_section_durations",
+    "RenderAppend",
+    "RenderSegment",
+    "VoicebankRenderScheduler",
+    "fit_audio_length",
+    "resample_audio",
 ]

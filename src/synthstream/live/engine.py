@@ -10,7 +10,6 @@ from threading import Event, Lock, Thread
 
 import numpy as np
 import numpy.typing as npt
-from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
 from synthstream.analysis import (
     AnalysisConfig,
@@ -29,11 +28,12 @@ from synthstream.offline.direct_phonemes import (
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.rendering import (
     AliasEvent,
-    BufferedOverlapComposer,
+    RenderSegment,
     VoicebankRenderer,
+    VoicebankRenderScheduler,
     allocate_alias_section_durations,
 )
-from synthstream.voicebank import Voicebank, VoicebankUnit, load_voicebank
+from synthstream.voicebank import Voicebank, load_voicebank
 
 AudioSamples = npt.NDArray[np.float32]
 
@@ -160,15 +160,14 @@ class LiveVoicebankEngine:
         self.direct_context_padding_samples = max(
             1, round(direct_context_padding_seconds * sample_rate)
         )
-        self.internal_section_crossfade_samples = max(
-            0, round(internal_section_crossfade_ms * sample_rate / 1000.0)
-        )
         self.diagnostic_input_samples = max(1, round(diagnostic_input_seconds * sample_rate))
-        self._units = {unit.id: unit for unit in bank.units}
-        self._overlap_composer = BufferedOverlapComposer(sample_rate, staging_seconds=0.12)
-        self._scheduled_output_samples = 0
-        self._previous_rendered_unit_id: str | None = None
-        self._onset_stretch_by_unit: dict[str, float] = {}
+        self._render_scheduler = VoicebankRenderScheduler(
+            bank,
+            self.renderer,
+            sample_rate,
+            staging_seconds=0.12,
+            internal_section_crossfade_ms=internal_section_crossfade_ms,
+        )
         self._pending_input = np.empty(0, dtype=np.float32)
         self._direct_audio = np.empty(0, dtype=np.float32)
         self._direct_total_samples = 0
@@ -255,10 +254,7 @@ class LiveVoicebankEngine:
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
         self._emitted_output_samples = 0
-        self._scheduled_output_samples = 0
-        self._previous_rendered_unit_id = None
-        self._onset_stretch_by_unit.clear()
-        self._overlap_composer.reset()
+        self._render_scheduler.reset()
         self.stream.input_buffer.clear()
         self.stream.output_buffer.clear()
         self._worker_stop.clear()
@@ -325,7 +321,7 @@ class LiveVoicebankEngine:
         ):
             update = self.streaming_decoder.finish()
             self._consume_committed(update.committed_segments)
-        self._flush_overlap_output()
+        self._write_released(self._render_scheduler.flush())
 
     def _worker_loop(self) -> None:
         wait_seconds = self.stream.block_size / self.stream.sample_rate / 2
@@ -594,91 +590,22 @@ class LiveVoicebankEngine:
 
     def _consume_committed(self, segments: tuple[DecodedSegment, ...]) -> None:
         for segment in segments:
-            start_sample = round(
-                segment.start_frame
-                * self.extractor.config.hop_samples
-                * self.stream.sample_rate
-                / self.extractor.config.sample_rate
+            hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
+            render_segment = RenderSegment(
+                unit_id=segment.unit_id,
+                alias=segment.alias,
+                section_index=segment.section_index,
+                section_kind=segment.section_kind,
+                start_seconds=segment.start_frame * hop_seconds,
+                end_seconds=segment.end_frame * hop_seconds,
+                stretch_ratio=segment.stretch_ratio,
+                pitch_ratio=self.pitch_ratio * segment.pitch_ratio,
             )
-            if start_sample > self._scheduled_output_samples:
-                self._write_released(
-                    self._overlap_composer.append(
-                        np.zeros(start_sample - self._scheduled_output_samples, dtype=np.float32),
-                        overlap_samples=0,
-                    )
-                )
-                self._scheduled_output_samples = start_sample
-                self._previous_rendered_unit_id = None
-
-            target_samples = max(
-                1,
-                round(
-                    (segment.end_frame - segment.start_frame)
-                    * self.extractor.config.hop_samples
-                    * self.stream.sample_rate
-                    / self.extractor.config.sample_rate
-                ),
-            )
-            if segment.is_silence:
-                rendered = np.zeros(target_samples, dtype=np.float32)
-                overlap_samples = 0
-                self._previous_rendered_unit_id = None
-            else:
-                if segment.unit_id is None or segment.section_index is None:
-                    raise ValueError("voiced segment is missing voicebank identity")
-                unit = self._units.get(segment.unit_id)
-                if unit is None or not 0 <= segment.section_index < len(unit.sections):
-                    raise ValueError(
-                        "committed segment references an unavailable voicebank section"
-                    )
-                overlap_samples = self._calculate_overlap_samples(unit, segment, target_samples)
-                if segment.section_kind == "onset":
-                    self._onset_stretch_by_unit[unit.id] = max(segment.stretch_ratio, 1e-6)
-                result = self.renderer.render_section(
-                    unit,
-                    unit.sections[segment.section_index],
-                    duration_seconds=(target_samples + overlap_samples) / self.stream.sample_rate,
-                    pitch_ratio=self.pitch_ratio * segment.pitch_ratio,
-                )
-                rendered = _resample(result.samples, result.sample_rate, self.stream.sample_rate)
-                rendered = _fit_length(rendered, target_samples + overlap_samples)
-                self._previous_rendered_unit_id = unit.id
-            self._write_released(
-                self._overlap_composer.append(rendered, overlap_samples=overlap_samples)
-            )
-            self._scheduled_output_samples = max(
-                self._scheduled_output_samples,
-                start_sample + target_samples,
-            )
-            self._emitted_output_samples = self._scheduled_output_samples
+            result = self._render_scheduler.append(render_segment)
+            self._write_released(result.released)
+            self._emitted_output_samples = self._render_scheduler.scheduled_samples
             with self._statistics_lock:
                 self._committed_segments += 1
-
-    def _calculate_overlap_samples(
-        self,
-        unit: VoicebankUnit,
-        segment: DecodedSegment,
-        target_samples: int,
-    ) -> int:
-        unit_id = unit.id
-        if (
-            self._previous_rendered_unit_id == unit_id
-            and segment.section_index is not None
-            and segment.section_index > 0
-        ):
-            return min(target_samples, self.internal_section_crossfade_samples)
-        if self._previous_rendered_unit_id in (None, unit_id):
-            return 0
-        overlap_ms = max(0.0, unit.overlap_ms)
-        if overlap_ms <= 0:
-            return 0
-        stretch = self._onset_stretch_by_unit.get(unit_id, 1.0)
-        if segment.section_kind == "onset":
-            stretch = max(segment.stretch_ratio, 1e-6)
-        return min(
-            target_samples,
-            max(0, round(overlap_ms * self.stream.sample_rate / 1000.0 * stretch)),
-        )
 
     def _write_released(self, samples: AudioSamples) -> None:
         if not len(samples):
@@ -686,26 +613,3 @@ class LiveVoicebankEngine:
         self.stream.write_output(samples)
         with self._statistics_lock:
             self._rendered_output_samples += len(samples)
-
-    def _flush_overlap_output(self) -> None:
-        self._write_released(self._overlap_composer.flush())
-
-
-def _resample(samples: AudioSamples, source_rate: int, target_rate: int) -> AudioSamples:
-    if source_rate == target_rate:
-        return samples
-    divisor = math.gcd(source_rate, target_rate)
-    return np.asarray(
-        resample_poly(samples, target_rate // divisor, source_rate // divisor),
-        dtype=np.float32,
-    )
-
-
-def _fit_length(samples: AudioSamples, target_samples: int) -> AudioSamples:
-    if len(samples) == target_samples:
-        return samples
-    if len(samples) > target_samples:
-        return np.asarray(samples[:target_samples], dtype=np.float32)
-    result = np.zeros(target_samples, dtype=np.float32)
-    result[: len(samples)] = samples
-    return result
