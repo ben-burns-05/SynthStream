@@ -177,8 +177,6 @@ def test_live_engine_uses_direct_ipa_for_real_aiko_voicebank() -> None:
         bank_path,
         backend,
         analysis_chunk_seconds=0.2,
-        direct_update_seconds=0.4,
-        buffer_duration_seconds=5.0,
     )
     engine.start(background=False)
     # Exercise the low-level signal range common to USB/wireless microphones.
@@ -302,4 +300,5 @@ def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -
     assert final_statistics.committed_segments > first_statistics.committed_segments
     assert float(np.max(np.abs(second_window))) > 0.01
     assert transport_statistics.input_overflow_samples == 0
+    assert transport_statistics.output_overflow_samples == 0
     assert final_statistics.worker_error is None

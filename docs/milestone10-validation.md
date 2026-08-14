@@ -11,8 +11,10 @@ remains bounded and does not run model, matcher, or rendering work. A background
 `process_available()` and queues only committed sections to the output ring buffer.
 
 Direct mode is the default and requires a supported English CVVC/VCCV/Presamp profile. It keeps
-a 1.2-second recognition window, updates every 0.4 seconds, and commits aliases after a 0.4
-second stability lag. Each committed alias expands into its real OTO-derived onset, transition,
+a 1.2-second recognition window, updates every 0.8 seconds, and commits aliases after a 0.4
+second stability lag. The live transport defaults to four seconds of bounded input/output
+buffering so model-inference bursts do not immediately drop microphone or rendered samples.
+Each committed alias expands into its real OTO-derived onset, transition,
 and sustain sections. `use_direct_ipa=False` explicitly selects the optimized Milestone 9
 acoustic matcher for banks without a direct profile.
 
