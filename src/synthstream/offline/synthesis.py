@@ -98,7 +98,6 @@ def synthesize_timeline(
                 section_kind=segment.section_kind,
                 start_seconds=segment.start_seconds,
                 end_seconds=segment.end_seconds,
-                stretch_ratio=segment.stretch_ratio,
                 pitch_ratio=pitch_ratio * segment_pitch_ratio,
             )
         )

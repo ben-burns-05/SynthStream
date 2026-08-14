@@ -77,7 +77,6 @@ def test_pitch_transfer_uses_one_alias_reference_pitch(tmp_path: Path) -> None:
     )
 
     assert ratio == pytest.approx(2.0)
-    assert unit.pitch_reference_section.kind == "sustain"
     assert unit.section_at(0) is unit.sections[0]
 
 

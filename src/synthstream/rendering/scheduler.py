@@ -26,7 +26,6 @@ class RenderSegment:
     section_kind: str
     start_seconds: float
     end_seconds: float
-    stretch_ratio: float = 1.0
     pitch_ratio: float = 1.0
 
     @property
@@ -71,7 +70,6 @@ class VoicebankRenderScheduler:
         )
         self._scheduled_samples = 0
         self._previous_unit_id: str | None = None
-        self._onset_stretch_by_unit: dict[str, float] = {}
 
     @property
     def scheduled_samples(self) -> int:
@@ -83,7 +81,6 @@ class VoicebankRenderScheduler:
         self._composer.reset()
         self._scheduled_samples = 0
         self._previous_unit_id = None
-        self._onset_stretch_by_unit.clear()
 
     def append(self, segment: RenderSegment) -> RenderAppend:
         """Schedule one silence or voiced section and return immutable output."""
@@ -110,8 +107,6 @@ class VoicebankRenderScheduler:
         else:
             unit = self._resolve_unit(segment)
             overlap_samples = self._overlap_samples(unit, segment, target_samples)
-            if segment.section_kind == "onset":
-                self._onset_stretch_by_unit[unit.id] = max(segment.stretch_ratio, 1e-6)
             result = self.renderer.render_section(
                 unit,
                 unit.section_at(segment.section_index or 0),
@@ -159,12 +154,9 @@ class VoicebankRenderScheduler:
         overlap_ms = max(0.0, unit.overlap_ms)
         if overlap_ms <= 0:
             return 0
-        stretch = self._onset_stretch_by_unit.get(unit.id, 1.0)
-        if segment.section_kind == "onset":
-            stretch = max(segment.stretch_ratio, 1e-6)
         return min(
             target_samples,
-            max(0, round(overlap_ms * self.output_sample_rate / 1000.0 * stretch)),
+            max(0, round(overlap_ms * self.output_sample_rate / 1000.0)),
         )
 
 

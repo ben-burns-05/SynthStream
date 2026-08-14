@@ -79,8 +79,6 @@ def test_gui_waits_for_direct_model_before_starting_transport(
         VoicebankProfile("test", "english-cvvc", {}, frozenset()),
         0.95,
         1.0,
-        (),
-        "test profile",
     )
     monkeypatch.setattr(live_engine_module, "detect_voicebank_profile", lambda bank: capability)
     preparation_started = Event()

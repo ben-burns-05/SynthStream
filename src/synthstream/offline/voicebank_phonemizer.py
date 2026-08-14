@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path
 
 from synthstream.voicebank import Voicebank
 
@@ -20,7 +19,6 @@ from synthstream.voicebank import Voicebank
 class AliasCandidate:
     alias: str
     phone_indices: tuple[int, ...]
-    rank: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,8 +171,6 @@ class VoicebankCapability:
     profile: VoicebankProfile | None
     confidence: float
     alias_coverage: float
-    metadata_files: tuple[Path, ...]
-    reason: str
 
     @property
     def supported(self) -> bool:
@@ -184,17 +180,14 @@ class VoicebankCapability:
 def detect_voicebank_profile(bank: Voicebank) -> VoicebankCapability:
     """Identify a supported convention from metadata and the actual alias set."""
     aliases = frozenset(unit.alias for unit in bank.units)
-    presamp_files = tuple(
-        path
-        for path in bank.root.rglob("presamp.ini")
-        if path.is_file()
+    has_presamp = any(
+        path.is_file() for path in bank.root.rglob("presamp.ini")
     )
-    if presamp_files:
+    if has_presamp:
         profile = _english_presamp_profile()
         coverage = _probe_coverage(profile, aliases)
         confidence = 0.9 if coverage >= 0.75 else 0.0
-        reason = "presamp.ini declares an English vowel/consonant inventory"
-        return VoicebankCapability(profile, confidence, coverage, presamp_files, reason)
+        return VoicebankCapability(profile, confidence, coverage)
 
     if any(alias.startswith("_") for alias in aliases) and "@ d" in aliases:
         profile = _english_vccv_profile()
@@ -203,8 +196,6 @@ def detect_voicebank_profile(bank: Voicebank) -> VoicebankCapability:
             profile,
             0.9 if coverage >= 0.75 else 0.0,
             coverage,
-            (),
-            "English VCCV alias markers detected",
         )
 
     if {"-I", "h@", "@d", "dh@", "@t"}.issubset(aliases):
@@ -214,16 +205,12 @@ def detect_voicebank_profile(bank: Voicebank) -> VoicebankCapability:
             profile,
             0.95 if coverage >= 0.75 else 0.0,
             coverage,
-            (),
-            "Aiko-style English CVVC aliases detected",
         )
 
     return VoicebankCapability(
         None,
         0.0,
         0.0,
-        presamp_files,
-        "no supported English CVVC, VCCV, or Presamp profile detected",
     )
 
 
@@ -239,9 +226,9 @@ def resolve_alias_candidates(
 def _available(
     forms: Iterable[str], indices: tuple[int, ...], aliases: frozenset[str]
 ) -> tuple[AliasCandidate, ...]:
-    for rank, alias in enumerate(forms):
+    for alias in forms:
         if alias in aliases:
-            return (AliasCandidate(alias, indices, rank),)
+            return (AliasCandidate(alias, indices),)
     return ()
 
 
@@ -322,34 +309,3 @@ def _english_presamp_profile() -> VoicebankProfile:
         frozenset({"aI", "{", "A", "@", "V", "i", "I", "U", "u", "oU", "E", "3"}),
     )
 
-
-def read_presamp_metadata(path: str | Path) -> dict[str, tuple[str, ...]]:
-    """Read the useful declarative parts of a ``presamp.ini`` file."""
-    raw = Path(path).read_bytes()
-    text = None
-    for encoding in ("utf-8-sig", "cp932", "shift_jis"):
-        try:
-            text = raw.decode(encoding)
-            break
-        except UnicodeDecodeError:
-            continue
-    if text is None:
-        raise ValueError(f"Unsupported presamp.ini encoding: {path}")
-    result: dict[str, tuple[str, ...]] = {}
-    current: str | None = None
-    keys: dict[str, list[str]] = {}
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith(("#", ";")):
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            current = line[1:-1].upper()
-            keys.setdefault(current, [])
-        elif current in {"VOWEL", "CONSONANT", "REPLACE"} and "=" in line:
-            keys[current].append(line.split("=", 1)[0].strip())
-        elif current == "PRIORITY":
-            keys[current].extend(part.strip() for part in line.split(",") if part.strip())
-    for section in ("VOWEL", "CONSONANT", "REPLACE", "PRIORITY"):
-        if section in keys:
-            result[section] = tuple(keys[section])
-    return result

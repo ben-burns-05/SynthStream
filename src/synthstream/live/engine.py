@@ -583,7 +583,6 @@ class LiveVoicebankEngine:
                 section_kind=segment.section_kind,
                 start_seconds=segment.start_frame * hop_seconds,
                 end_seconds=segment.end_frame * hop_seconds,
-                stretch_ratio=segment.stretch_ratio,
                 pitch_ratio=self.pitch_ratio * segment.pitch_ratio,
             )
             result = self._render_scheduler.append(render_segment)

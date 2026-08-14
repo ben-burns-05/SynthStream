@@ -44,16 +44,6 @@ class VoicebankUnit:
     def duration_seconds(self) -> float:
         return sum(section.duration_seconds for section in self.sections)
 
-    @property
-    def pitch_reference_section(self) -> VoicebankSection:
-        """Return the stable section used as this alias's recorded pitch reference."""
-        if not self.sections:
-            raise ValueError("voicebank unit has no renderable sections")
-        return next(
-            (section for section in self.sections if section.kind == "sustain"),
-            self.sections[-1],
-        )
-
     def section_at(self, index: int) -> VoicebankSection:
         """Return a section by index with one consistent validation boundary."""
         if not 0 <= index < len(self.sections):
