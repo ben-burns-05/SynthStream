@@ -10,8 +10,10 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import soundfile as sf  # type: ignore[import-untyped]
 
+from synthstream.analysis import estimate_quantized_pitch_hz
 from synthstream.voicebank.models import (
     Voicebank,
     VoicebankIssue,
@@ -19,7 +21,7 @@ from synthstream.voicebank.models import (
     VoicebankUnit,
 )
 
-_CACHE_SCHEMA = 2
+_CACHE_SCHEMA = 3
 _CACHE_DIRECTORY = ".synthstream-cache"
 _CACHE_FILENAME = "voicebank-v1.json"
 
@@ -138,6 +140,7 @@ def _parse_unit(root: Path, oto_path: Path, line_number: int, line: str) -> Voic
         preutterance_ms,
         location,
     )
+    source_pitch_hz = _estimate_source_pitch(wav_path, sections, info.samplerate)
     unit_id = f"{oto_path.relative_to(root).as_posix()}:{line_number}"
     return VoicebankUnit(
         id=unit_id,
@@ -152,6 +155,7 @@ def _parse_unit(root: Path, oto_path: Path, line_number: int, line: str) -> Voic
         preutterance_ms=preutterance_ms,
         overlap_ms=overlap_ms,
         sections=sections,
+        source_pitch_hz=source_pitch_hz,
     )
 
 
@@ -212,6 +216,32 @@ def _make_sections(
     if not sections:
         raise VoicebankLoadError(f"oto.ini timing creates no sections at {location}")
     return sections
+
+
+def _estimate_source_pitch(
+    wav_path: Path,
+    sections: tuple[VoicebankSection, ...],
+    sample_rate: int,
+) -> float | None:
+    """Precompute the canonical recorded pitch used for alias transfer."""
+    reference = next(
+        (section for section in sections if section.kind == "sustain"),
+        sections[-1],
+    )
+    try:
+        waveform, file_sample_rate = sf.read(
+            wav_path,
+            start=reference.start_sample,
+            stop=reference.end_sample,
+            dtype="float32",
+            always_2d=True,
+        )
+    except (RuntimeError, sf.LibsndfileError):
+        return None
+    if file_sample_rate != sample_rate or not len(waveform):
+        return None
+    mono = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
+    return estimate_quantized_pitch_hz(mono, sample_rate)
 
 
 def _fingerprint(
@@ -301,6 +331,7 @@ def _unit_to_dict(root: Path, unit: VoicebankUnit) -> dict[str, Any]:
         "cutoff_ms": unit.cutoff_ms,
         "preutterance_ms": unit.preutterance_ms,
         "overlap_ms": unit.overlap_ms,
+        "source_pitch_hz": unit.source_pitch_hz,
         "sections": [
             {
                 "kind": section.kind,

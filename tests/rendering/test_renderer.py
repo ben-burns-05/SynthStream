@@ -72,6 +72,7 @@ def test_estimates_recorded_section_pitch_and_caches_it(tmp_path: Path) -> None:
     unit = load_voicebank(tmp_path, use_cache=False).units[0]
     renderer = VoicebankRenderer()
 
+    assert unit.source_pitch_hz == pytest.approx(220, abs=0.1)
     first = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
     second = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
 
@@ -92,6 +93,16 @@ def test_pitch_transfer_uses_one_alias_reference_pitch(tmp_path: Path) -> None:
     assert ratio == pytest.approx(2.0)
     assert unit.pitch_reference_section.kind == "sustain"
     assert unit.section_at(0) is unit.sections[0]
+
+
+def test_source_pitch_is_persisted_in_voicebank_cache(tmp_path: Path) -> None:
+    _make_sine_bank(tmp_path)
+    first = load_voicebank(tmp_path)
+    second = load_voicebank(tmp_path)
+
+    assert second.cache_hit
+    assert second.units[0].source_pitch_hz == first.units[0].source_pitch_hz
+    assert second.units[0].source_pitch_hz == pytest.approx(220, abs=0.1)
 
 
 def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path) -> None:

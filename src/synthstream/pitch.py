@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-import soundfile as sf  # type: ignore[import-untyped]
 
 from synthstream.analysis import bounded_pitch_ratio, estimate_quantized_pitch_hz
-from synthstream.voicebank import VoicebankSection, VoicebankUnit
+from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
 
 AudioSamples = npt.NDArray[np.float32]
 
 
 class VoicebankPitchCache:
-    """Cache one quantized recorded pitch estimate per voicebank section."""
+    """Read precomputed quantized recorded pitches from voicebank units."""
 
     def __init__(self) -> None:
         self._cache: dict[tuple[str, int, int], float | None] = {}
@@ -21,22 +20,12 @@ class VoicebankPitchCache:
     def estimate_section_pitch_hz(
         self, unit: VoicebankUnit, section: VoicebankSection
     ) -> float | None:
-        """Estimate a section's recorded F0, validating the section ownership."""
+        """Return a section's precomputed recorded F0."""
         if section not in unit.sections:
             raise ValueError("section does not belong to the supplied unit")
         key = (unit.id, section.start_sample, section.end_sample)
         if key not in self._cache:
-            waveform, file_sample_rate = sf.read(
-                unit.wav_path,
-                start=section.start_sample,
-                stop=section.end_sample,
-                dtype="float32",
-                always_2d=True,
-            )
-            if file_sample_rate != unit.sample_rate:
-                raise ValueError("WAV sample rate changed after voicebank loading")
-            mono = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
-            self._cache[key] = estimate_quantized_pitch_hz(mono, unit.sample_rate)
+            self._cache[key] = unit.source_pitch_hz
         return self._cache[key]
 
     def estimate_unit_pitch_hz(self, unit: VoicebankUnit) -> float | None:

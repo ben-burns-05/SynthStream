@@ -38,6 +38,7 @@ class VoicebankUnit:
     preutterance_ms: float
     overlap_ms: float
     sections: tuple[VoicebankSection, ...]
+    source_pitch_hz: float | None = None
 
     @property
     def duration_seconds(self) -> float:
