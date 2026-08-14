@@ -5,8 +5,6 @@ from synthstream.analysis import (
     AnalysisConfig,
     FeatureExtractor,
     bounded_pitch_ratio,
-    estimate_fast_f0_hz,
-    estimate_median_f0_hz,
     estimate_quantized_pitch_hz,
     quantize_pitch_hz,
 )
@@ -43,11 +41,7 @@ def test_yin_pitch_tracks_tone_and_keeps_f0_out_of_recognition_features() -> Non
     assert low.recognition_features.shape == high.recognition_features.shape
 
 
-def test_pitch_helpers_track_tone_and_bound_transfer_ratio() -> None:
-    tone = _tone(220)
-
-    assert estimate_median_f0_hz(tone, SAMPLE_RATE) == pytest.approx(220, abs=2)
-    assert estimate_fast_f0_hz(tone, SAMPLE_RATE) == pytest.approx(222, abs=4)
+def test_pitch_transfer_ratio_is_bounded_and_unvoiced_is_unity() -> None:
     assert bounded_pitch_ratio(880, 220) == pytest.approx(2.0)
     assert bounded_pitch_ratio(30, 220) == pytest.approx(0.5)
     assert bounded_pitch_ratio(None, 220) == 1.0

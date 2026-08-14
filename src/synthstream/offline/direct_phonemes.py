@@ -320,11 +320,3 @@ class DirectAliasPlanner:
         covered = {index for candidate in candidates for index in candidate.phone_indices}
         # Inventory coverage dominates small probability differences.
         return acoustic_score + 4.0 * len(covered) + 0.25 * len(candidates)
-
-
-class AikoDirectAliasPlanner(DirectAliasPlanner):
-    """Compatibility wrapper for the original Aiko-specific public class."""
-
-    def __init__(self, bank: Voicebank) -> None:
-        capability = detect_voicebank_profile(bank)
-        super().__init__(bank, capability.profile)

@@ -9,7 +9,6 @@ from synthstream.rendering.overlap import BufferedOverlapComposer
 from synthstream.rendering.renderer import (
     RenderResult,
     VoicebankRenderer,
-    rebalance_section_durations,
 )
 from synthstream.rendering.scheduler import (
     RenderAppend,
@@ -26,7 +25,6 @@ __all__ = [
     "allocate_sustain_only_durations",
     "RenderResult",
     "VoicebankRenderer",
-    "rebalance_section_durations",
     "RenderAppend",
     "RenderSegment",
     "VoicebankRenderScheduler",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import aubio  # type: ignore[import-untyped]
 import numpy as np
@@ -155,84 +155,6 @@ class FeatureExtractor:
             if is_voiced:
                 f0_hz[index] = frequency
         return periodicity, f0_hz, voiced
-
-
-def estimate_median_f0_hz(
-    samples: npt.ArrayLike,
-    sample_rate: int,
-    *,
-    config: AnalysisConfig | None = None,
-) -> float | None:
-    """Estimate the median voiced F0 in an audio region.
-
-    Pitch is intentionally kept separate from the matcher-facing features.  A
-    median over voiced frames is stable for short phoneme regions and ignores
-    silence or consonant frames where YIN cannot provide a reliable estimate.
-    """
-    if sample_rate < 1:
-        raise ValueError("sample_rate must be positive")
-    analysis_config = config or AnalysisConfig(sample_rate=sample_rate)
-    if analysis_config.sample_rate != sample_rate:
-        analysis_config = replace(analysis_config, sample_rate=sample_rate)
-    batch = FeatureExtractor(analysis_config).analyze(samples)
-    return median_f0_hz(batch)
-
-
-def median_f0_hz(
-    batch: FeatureBatch,
-    *,
-    start_seconds: float | None = None,
-    end_seconds: float | None = None,
-) -> float | None:
-    """Return a median voiced F0 from an already analyzed feature batch."""
-    mask = batch.voiced & np.isfinite(batch.f0_hz)
-    if start_seconds is not None:
-        mask &= batch.frame_times_seconds >= start_seconds
-    if end_seconds is not None:
-        mask &= batch.frame_times_seconds < end_seconds
-    usable = batch.f0_hz[mask]
-    if not len(usable):
-        return None
-    return float(np.median(usable))
-
-
-def estimate_fast_f0_hz(
-    samples: npt.ArrayLike,
-    sample_rate: int,
-    *,
-    config: AnalysisConfig | None = None,
-) -> float | None:
-    """Estimate F0 with only YIN frames for latency-sensitive rendering."""
-    if sample_rate < 1:
-        raise ValueError("sample_rate must be positive")
-    analysis_config = config or AnalysisConfig(sample_rate=sample_rate)
-    if analysis_config.sample_rate != sample_rate:
-        analysis_config = replace(analysis_config, sample_rate=sample_rate)
-    mono = _as_mono(samples)
-    if not len(mono) or float(np.sqrt(np.mean(np.square(mono)))) < 1e-5:
-        return None
-    frame_length = min(
-        len(mono), max(analysis_config.window_samples, round(0.04 * sample_rate))
-    )
-    start = max(0, (len(mono) - frame_length) // 2)
-    frame = mono[start : start + frame_length]
-    if len(frame) < analysis_config.window_samples:
-        frame = np.pad(frame, (0, analysis_config.window_samples - len(frame)))
-    frame = frame * np.hanning(len(frame)).astype(np.float32)
-    fft_size = _next_power_of_two(len(frame) * 2)
-    spectrum = np.fft.rfft(frame, n=fft_size)
-    autocorrelation = np.fft.irfft(np.square(np.abs(spectrum)), n=fft_size)
-    minimum_lag = max(2, int(sample_rate / analysis_config.maximum_f0_hz))
-    maximum_lag = min(len(frame) - 2, int(sample_rate / analysis_config.minimum_f0_hz))
-    if maximum_lag <= minimum_lag or autocorrelation[0] <= 1e-8:
-        return None
-    lag = minimum_lag + int(
-        np.argmax(autocorrelation[minimum_lag : maximum_lag + 1])
-    )
-    confidence = float(autocorrelation[lag] / autocorrelation[0])
-    if confidence < 0.2:
-        return None
-    return float(sample_rate / lag)
 
 
 def estimate_quantized_pitch_hz(

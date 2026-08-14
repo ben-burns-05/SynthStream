@@ -12,8 +12,6 @@ import torchaudio.functional as audio_functional  # type: ignore[import-untyped]
 from scipy.signal import resample  # type: ignore[import-untyped]
 
 from synthstream.audio.output import AudioSamples, AudioSink
-from synthstream.pitch import VoicebankPitchCache
-from synthstream.rendering.events import allocate_sustain_only_durations
 from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
 
 
@@ -41,13 +39,6 @@ class VoicebankRenderer:
         if not math.isfinite(output_gain) or output_gain < 0:
             raise ValueError("output_gain must be finite and non-negative")
         self.output_gain = output_gain
-        self._pitch_cache = VoicebankPitchCache()
-
-    def estimate_section_pitch_hz(
-        self, unit: VoicebankUnit, section: VoicebankSection
-    ) -> float | None:
-        """Compatibility access to the shared voicebank pitch cache."""
-        return self._pitch_cache.estimate_section_pitch_hz(unit, section)
 
     def render_unit(
         self,
@@ -171,24 +162,3 @@ def _time_stretch(samples: AudioSamples, target_samples: int) -> AudioSamples:
 
 def _largest_power_of_two(value: int) -> int:
     return 1 << (value.bit_length() - 1)
-
-
-def rebalance_section_durations(
-    sections: tuple[VoicebankSection, ...],
-    target_samples: tuple[int, ...],
-    *,
-    sample_rate: int,
-    transient_min_ratio: float = 0.75,
-    transient_max_ratio: float = 1.25,
-) -> tuple[int, ...]:
-    """Compatibility wrapper for sustain-only alias duration allocation."""
-    if len(sections) != len(target_samples):
-        raise ValueError("sections and target_samples must have equal length")
-    if sample_rate <= 0 or not sections:
-        raise ValueError("sample_rate and sections must be positive")
-    del transient_min_ratio, transient_max_ratio
-    return allocate_sustain_only_durations(
-        sections,
-        sum(max(1, int(value)) for value in target_samples),
-        timebase_hz=sample_rate,
-    )

@@ -12,7 +12,6 @@ from synthstream.rendering import (
     AliasEvent,
     VoicebankRenderer,
     allocate_alias_section_durations,
-    rebalance_section_durations,
 )
 from synthstream.voicebank import load_voicebank
 
@@ -67,19 +66,6 @@ def test_can_render_an_individual_metadata_section(tmp_path: Path) -> None:
     assert result.unit_id == unit.id
 
 
-def test_estimates_recorded_section_pitch_and_caches_it(tmp_path: Path) -> None:
-    _make_sine_bank(tmp_path)
-    unit = load_voicebank(tmp_path, use_cache=False).units[0]
-    renderer = VoicebankRenderer()
-
-    assert unit.source_pitch_hz == pytest.approx(220, abs=0.1)
-    first = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
-    second = renderer.estimate_section_pitch_hz(unit, unit.sections[0])
-
-    assert first == pytest.approx(220, abs=0.1)
-    assert second == first
-
-
 def test_pitch_transfer_uses_one_alias_reference_pitch(tmp_path: Path) -> None:
     _make_sine_bank(tmp_path)
     unit = load_voicebank(tmp_path, use_cache=False).units[0]
@@ -103,22 +89,6 @@ def test_source_pitch_is_persisted_in_voicebank_cache(tmp_path: Path) -> None:
     assert second.cache_hit
     assert second.units[0].source_pitch_hz == first.units[0].source_pitch_hz
     assert second.units[0].source_pitch_hz == pytest.approx(220, abs=0.1)
-
-
-def test_section_duration_rebalance_assigns_extra_time_to_sustain(tmp_path: Path) -> None:
-    _make_sine_bank(tmp_path)
-    unit = load_voicebank(tmp_path, use_cache=False).units[0]
-
-    durations = rebalance_section_durations(
-        unit.sections,
-        (4_000, 4_000, 4_000),
-        sample_rate=SAMPLE_RATE,
-    )
-
-    assert sum(durations) == 12_000
-    assert durations[0] == 800
-    assert durations[1] == 2_400
-    assert durations[2] == 8_800
 
 
 def test_alias_event_allocates_only_sustain_time(tmp_path: Path) -> None:

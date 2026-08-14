@@ -22,10 +22,8 @@ from synthstream.decoding import (
 )
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
 from synthstream.offline.direct_phonemes import (
-    DetectedPhone,
     DirectAliasPlanner,
     DirectIPARecognizer,
-    DirectPlannedAlias,
 )
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.rendering import AliasEvent, allocate_alias_section_durations
@@ -407,59 +405,3 @@ def _estimate_active_end_frame(
     end_seconds = min(len(samples) / sample_rate, math.ceil(end_seconds / 0.05) * 0.05)
     return min(frame_count, max(1, math.ceil(end_seconds / hop_seconds)))
 
-
-def _strict_boundaries(
-    boundaries: list[int], start_frame: int, end_frame: int
-) -> list[int]:
-    """Keep proportional section boundaries ordered within short aliases."""
-    result = boundaries.copy()
-    for index in range(1, len(result) - 1):
-        minimum = result[index - 1] + 1
-        maximum = end_frame - (len(result) - 1 - index)
-        result[index] = min(max(result[index], minimum), max(minimum, maximum))
-    result[0], result[-1] = start_frame, end_frame
-    return result
-
-
-def _phone_aware_section_boundaries(
-    planned: DirectPlannedAlias,
-    phones: tuple[DetectedPhone, ...],
-    start_frame: int,
-    end_frame: int,
-    hop_seconds: float,
-) -> list[int]:
-    """Place OTO transition sections around an observed acoustic phone boundary."""
-    sections = planned.unit.sections
-    durations = np.array(
-        [section.duration_seconds for section in sections],
-        dtype=np.float64,
-    )
-    cumulative = np.concatenate(([0.0], np.cumsum(durations / np.sum(durations))))
-    boundaries = [
-        start_frame + round((end_frame - start_frame) * float(position))
-        for position in cumulative
-    ]
-    boundaries[0], boundaries[-1] = start_frame, end_frame
-
-    transition_index = next(
-        (index for index, section in enumerate(sections) if section.kind == "transition"),
-        None,
-    )
-    if transition_index is not None and len(planned.phone_indices) >= 2:
-        left = phones[planned.phone_indices[-2]]
-        right = phones[planned.phone_indices[-1]]
-        acoustic_boundary = (left.end_seconds + right.start_seconds) / 2
-        center_frame = round(acoustic_boundary / hop_seconds)
-        transition_frames = max(
-            1,
-            round(
-                (end_frame - start_frame)
-                * durations[transition_index]
-                / np.sum(durations)
-            ),
-        )
-        boundaries[transition_index] = center_frame - transition_frames // 2
-        boundaries[transition_index + 1] = (
-            boundaries[transition_index] + transition_frames
-        )
-    return _strict_boundaries(boundaries, start_frame, end_frame)
