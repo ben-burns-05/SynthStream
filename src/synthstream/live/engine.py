@@ -74,7 +74,10 @@ class LiveVoicebankEngine:
         sample_rate: int = 16_000,
         block_size: int = 320,
         analysis_chunk_seconds: float = 0.1,
-        buffer_duration_seconds: float = 4.0,
+        # Endpoint recognition can finish an utterance in a short burst. Keep
+        # enough queued audio to absorb the bounded six-second final window
+        # without dropping samples, while rolling updates remain low latency.
+        buffer_duration_seconds: float = 8.0,
         analysis_config: AnalysisConfig | None = None,
         match_weights: MatchWeights | None = None,
         decoder_config: DecoderConfig | None = None,

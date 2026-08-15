@@ -251,6 +251,10 @@ def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -
     )
     assert sample_rate == SAMPLE_RATE
     speech = np.mean(human, axis=1)
+    speech = np.tile(
+        speech,
+        int(np.ceil(round(6.0 * SAMPLE_RATE) / len(speech))),
+    )[: round(6.0 * SAMPLE_RATE)]
 
     def silence(seconds: float) -> np.ndarray:
         return np.zeros(round(seconds * SAMPLE_RATE), dtype=np.float32)
@@ -260,8 +264,6 @@ def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -
         bank_path,
         backend,
         analysis_chunk_seconds=0.2,
-        direct_update_seconds=0.4,
-        buffer_duration_seconds=5.0,
     )
     engine.prepare_direct_ipa()
     engine.start(background=True)
