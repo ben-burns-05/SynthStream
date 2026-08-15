@@ -13,6 +13,12 @@ from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
 PROJECT_ROOT = Path(__file__).parents[2]
+SHORT_WORD_SEGMENTS = (
+    ("I", 0.624, 0.704),
+    ("ME", 2.374, 2.495),
+    ("AT", 2.535, 2.595),
+    ("THIS", 2.635, 2.796),
+)
 
 
 def _tone(frequency: float, duration: float) -> np.ndarray:
@@ -304,3 +310,54 @@ def test_live_real_aiko_survives_long_silence_and_recognizes_followup_speech() -
     assert transport_statistics.input_overflow_samples == 0
     assert transport_statistics.output_overflow_samples == 0
     assert final_statistics.worker_error is None
+
+
+def test_live_real_teto_uses_labelled_short_words_with_pauses() -> None:
+    """Exercise live conversion on known isolated word windows, not an unlabeled excerpt."""
+    bank_path = PROJECT_ROOT / "voicebank" / "TETO-English-150401"
+    if not bank_path.is_dir():
+        pytest.skip("local TETO English development voicebank is not installed")
+
+    human, sample_rate = sf.read(
+        PROJECT_ROOT / "tests" / "fixtures" / "human" / "voices_sentence.wav",
+        dtype="float32",
+        always_2d=True,
+    )
+    assert sample_rate == SAMPLE_RATE
+    speech = np.mean(human, axis=1)
+    padding = round(0.04 * SAMPLE_RATE)
+    pause = np.zeros(round(0.9 * SAMPLE_RATE), dtype=np.float32)
+    chunks: list[np.ndarray] = []
+    for _, start_seconds, end_seconds in SHORT_WORD_SEGMENTS:
+        start = max(0, round(start_seconds * SAMPLE_RATE) - padding)
+        end = min(len(speech), round(end_seconds * SAMPLE_RATE) + padding)
+        chunks.extend((speech[start:end], pause))
+    source = np.concatenate(chunks).astype(np.float32, copy=False)
+
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine.from_voicebank(
+        bank_path,
+        backend,
+        analysis_chunk_seconds=0.2,
+        direct_update_seconds=0.4,
+        direct_commit_lag_seconds=0.2,
+        direct_endpoint_seconds=0.24,
+        buffer_duration_seconds=5.0,
+    )
+    engine.prepare_direct_ipa()
+    engine.start(background=True)
+    try:
+        for offset in range(0, len(source), 320):
+            backend.feed(source[offset : offset + 320])
+            time.sleep(0.02)
+    finally:
+        engine.stop(flush=True)
+
+    statistics = engine.statistics
+    transport_statistics = engine.stream.statistics
+    assert statistics.detected_phones > 0
+    assert statistics.planned_aliases > 0
+    assert statistics.rendered_output_samples > 0
+    assert statistics.worker_error is None
+    assert transport_statistics.input_overflow_samples == 0
+    assert transport_statistics.output_overflow_samples == 0
