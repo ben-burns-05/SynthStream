@@ -74,10 +74,7 @@ class LiveVoicebankEngine:
         sample_rate: int = 16_000,
         block_size: int = 320,
         analysis_chunk_seconds: float = 0.1,
-        # Endpoint recognition can finish an utterance in a short burst. Keep
-        # enough queued audio to absorb the bounded six-second final window
-        # without dropping samples, while rolling updates remain low latency.
-        buffer_duration_seconds: float = 8.0,
+        buffer_duration_seconds: float = 4.0,
         analysis_config: AnalysisConfig | None = None,
         match_weights: MatchWeights | None = None,
         decoder_config: DecoderConfig | None = None,
@@ -588,7 +585,10 @@ class LiveVoicebankEngine:
                 end_seconds=segment.end_frame * hop_seconds,
                 pitch_ratio=self.pitch_ratio * segment.pitch_ratio,
             )
-            result = self._render_scheduler.append(render_segment)
+            result = self._render_scheduler.append(
+                render_segment,
+                include_leading_gap=False,
+            )
             self._write_released(result.released)
             self._emitted_output_samples = self._render_scheduler.scheduled_samples
             with self._statistics_lock:

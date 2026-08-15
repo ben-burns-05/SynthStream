@@ -82,22 +82,35 @@ class VoicebankRenderScheduler:
         self._scheduled_samples = 0
         self._previous_unit_id = None
 
-    def append(self, segment: RenderSegment) -> RenderAppend:
-        """Schedule one silence or voiced section and return immutable output."""
+    def append(
+        self,
+        segment: RenderSegment,
+        *,
+        include_leading_gap: bool = True,
+    ) -> RenderAppend:
+        """Schedule one silence or voiced section and return immutable output.
+
+        Offline rendering includes timeline gaps as explicit silence. Live
+        playback leaves already-elapsed gaps to the device callback, which
+        naturally outputs silence instead of backfilling seconds of zeros into
+        the realtime output queue.
+        """
         start_sample = max(0, round(segment.start_seconds * self.output_sample_rate))
         end_sample = max(start_sample, round(segment.end_seconds * self.output_sample_rate))
         if end_sample <= start_sample:
             return RenderAppend(_empty_audio(), 0, 0, False)
 
-        if start_sample > self._scheduled_samples:
+        released = _empty_audio()
+        if include_leading_gap and start_sample > self._scheduled_samples:
             released = self._composer.append(
                 np.zeros(start_sample - self._scheduled_samples, dtype=np.float32),
                 overlap_samples=0,
             )
             self._scheduled_samples = start_sample
             self._previous_unit_id = None
-        else:
-            released = _empty_audio()
+        elif start_sample > self._scheduled_samples:
+            self._scheduled_samples = start_sample
+            self._previous_unit_id = None
 
         target_samples = end_sample - start_sample
         if segment.is_silence:

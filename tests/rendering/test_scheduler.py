@@ -60,3 +60,24 @@ def test_silence_resets_oto_overlap_context(tmp_path: Path) -> None:
     result = scheduler.append(_segment(second.id, second.alias, 0, 0.15, 0.20))
 
     assert result.overlap_samples == 0
+
+
+def test_live_append_does_not_backfill_elapsed_timeline_gap(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    bank = load_voicebank(tmp_path, use_cache=False)
+    scheduler = VoicebankRenderScheduler(
+        bank,
+        VoicebankRenderer(),
+        SAMPLE_RATE,
+        staging_seconds=0.0,
+    )
+    unit = bank.units[0]
+
+    scheduler.append(_segment(unit.id, unit.alias, 0, 0.0, 0.05))
+    result = scheduler.append(
+        _segment(unit.id, unit.alias, 0, 1.0, 1.05),
+        include_leading_gap=False,
+    )
+
+    assert len(result.released) == result.target_samples
+    assert scheduler.scheduled_samples == round(1.05 * SAMPLE_RATE)
