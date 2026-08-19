@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 from huggingface_hub import hf_hub_download
+from scipy.signal import resample_poly  # type: ignore[import-untyped]
 from transformers import AutoFeatureExtractor, AutoModelForCTC
 
 from synthstream.offline.voicebank_phonemizer import (
@@ -22,6 +24,8 @@ from synthstream.voicebank import Voicebank, VoicebankUnit
 
 FloatArray = npt.NDArray[np.float32]
 _MODEL_ID = "facebook/wav2vec2-lv-60-espeak-cv-ft"
+DIRECT_SAMPLE_RATE = 16_000
+DIRECT_MIN_CONTEXT_SECONDS = 0.8
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,56 +57,143 @@ class DirectPhoneticRecognition:
     unmapped_phones: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class DirectRecognitionWindow:
+    """Prepared model input plus the portion that contains real audio."""
+
+    samples: FloatArray
+    valid_start_seconds: float
+    valid_end_seconds: float
+
+
+def canonicalize_direct_audio(
+    samples: npt.ArrayLike,
+    sample_rate: int,
+) -> FloatArray:
+    """Convert direct-IPA input to the model's mono 16 kHz waveform format."""
+    if sample_rate < 1:
+        raise ValueError("sample_rate must be positive")
+    waveform = np.asarray(samples, dtype=np.float32)
+    if waveform.ndim == 2:
+        if waveform.shape[1] < 1:
+            raise ValueError("audio must contain at least one channel")
+        waveform = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
+    elif waveform.ndim != 1:
+        raise ValueError("audio must be mono or a channel-last matrix")
+    if not len(waveform):
+        raise ValueError("audio must be non-empty")
+    if not np.all(np.isfinite(waveform)):
+        raise ValueError("audio must contain only finite samples")
+    if sample_rate == DIRECT_SAMPLE_RATE:
+        return waveform.copy()
+    divisor = math.gcd(sample_rate, DIRECT_SAMPLE_RATE)
+    resampled = resample_poly(
+        waveform,
+        DIRECT_SAMPLE_RATE // divisor,
+        sample_rate // divisor,
+    )
+    return np.asarray(resampled, dtype=np.float32)
+
+
+def prepare_direct_window(
+    samples: FloatArray,
+    sample_rate: int,
+    *,
+    valid_start_seconds: float = 0.0,
+    valid_end_seconds: float | None = None,
+    minimum_context_seconds: float = DIRECT_MIN_CONTEXT_SECONDS,
+) -> DirectRecognitionWindow:
+    """Canonicalize and right-pad one direct-IPA recognition window.
+
+    Live and offline recognition must feed the model the same kind of input.  The
+    model always receives a finite mono ``float32`` waveform, padded to a small
+    minimum context when necessary.  ``valid_*`` describes the unpadded audio;
+    callers can therefore discard phones created from right padding or context.
+    """
+    if sample_rate != DIRECT_SAMPLE_RATE:
+        raise ValueError(
+            f"direct IPA recognizer requires {DIRECT_SAMPLE_RATE} Hz audio"
+        )
+    if not math.isfinite(minimum_context_seconds) or minimum_context_seconds <= 0:
+        raise ValueError("minimum_context_seconds must be finite and positive")
+    waveform = np.asarray(samples, dtype=np.float32)
+    if waveform.ndim != 1 or not len(waveform):
+        raise ValueError("direct IPA recognizer requires a non-empty mono waveform")
+    if not np.all(np.isfinite(waveform)):
+        raise ValueError("direct IPA recognizer input must contain only finite samples")
+
+    duration_seconds = len(waveform) / sample_rate
+    valid_end = duration_seconds if valid_end_seconds is None else valid_end_seconds
+    if (
+        not math.isfinite(valid_start_seconds)
+        or not math.isfinite(valid_end)
+        or valid_start_seconds < 0
+        or valid_end <= valid_start_seconds
+        or valid_end > duration_seconds + 1e-9
+    ):
+        raise ValueError("valid audio range must be inside the supplied waveform")
+
+    minimum_samples = max(1, round(minimum_context_seconds * sample_rate))
+    if len(waveform) < minimum_samples:
+        waveform = np.pad(waveform, (0, minimum_samples - len(waveform)))
+        waveform = np.asarray(waveform, dtype=np.float32)
+    return DirectRecognitionWindow(waveform, valid_start_seconds, valid_end)
+
+
 class DirectIPARecognizer:
     """CTC phone recognizer that never creates words or invokes G2P."""
 
-    def __init__(self, *, normalize_input: bool = False) -> None:
+    def __init__(self, *, normalize_input: bool = True) -> None:
+        # Retain the old keyword for callers while making the trained
+        # feature-extractor path mandatory in every mode.
+        del normalize_input
         self._model: Any | None = None
         self._labels: dict[int, str] | None = None
-        self._normalize_input = normalize_input
         self._feature_extractor: Any | None = None
 
     def warmup(self) -> None:
         """Load model and vocabulary assets before audio capture begins."""
         self._ensure_model()
-        if self._normalize_input:
-            self._ensure_feature_extractor()
+        self._ensure_feature_extractor()
 
     def recognize(
         self,
-        samples: FloatArray,
+        samples: npt.ArrayLike,
         sample_rate: int,
         *,
         top_k: int = 4,
+        valid_start_seconds: float = 0.0,
+        valid_end_seconds: float | None = None,
     ) -> tuple[DetectedPhone, ...]:
-        if sample_rate != 16_000:
-            raise ValueError("direct IPA recognizer requires 16 kHz audio")
         if top_k < 1:
             raise ValueError("top_k must be positive")
         model, labels = self._ensure_model()
 
-        waveform = np.asarray(samples, dtype=np.float32).copy()
-        attention_mask: Any | None = None
-        if self._normalize_input:
-            extractor = self._ensure_feature_extractor()
-            encoded = extractor(
-                waveform,
-                sampling_rate=sample_rate,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
-            input_values = encoded.input_values
-            attention_mask = getattr(encoded, "attention_mask", None)
-        else:
-            input_values = torch.from_numpy(waveform).unsqueeze(0)
-        with torch.inference_mode():
-            if attention_mask is None:
+        canonical_samples = canonicalize_direct_audio(samples, sample_rate)
+        window = prepare_direct_window(
+            canonical_samples,
+            DIRECT_SAMPLE_RATE,
+            valid_start_seconds=valid_start_seconds,
+            valid_end_seconds=valid_end_seconds,
+        )
+        extractor = self._ensure_feature_extractor()
+        encoded = extractor(
+            window.samples,
+            sampling_rate=DIRECT_SAMPLE_RATE,
+            return_tensors="pt",
+            return_attention_mask=True,
+        )
+        input_values = encoded.input_values
+        attention_mask: Any | None = getattr(encoded, "attention_mask", None)
+        if attention_mask is None:
+            with torch.inference_mode():
                 logits = model(input_values).logits[0]
-            else:
+        else:
+            with torch.inference_mode():
                 logits = model(input_values, attention_mask=attention_mask).logits[0]
         probabilities = torch.softmax(logits, dim=-1)
         ids = torch.argmax(probabilities, dim=-1)
-        frame_seconds = len(samples) / sample_rate / len(ids)
+        frame_seconds = len(window.samples) / DIRECT_SAMPLE_RATE / len(ids)
         spikes: list[tuple[str, int, float, tuple[tuple[str, float], ...]]] = []
         previous = -1
         for frame, token_tensor in enumerate(ids):
@@ -137,7 +228,22 @@ class DirectIPARecognizer:
                     alternatives,
                 )
             )
-        return tuple(phones)
+        clipped: list[DetectedPhone] = []
+        for phone in phones:
+            start = max(phone.start_seconds, window.valid_start_seconds)
+            end = min(phone.end_seconds, window.valid_end_seconds)
+            if end <= start:
+                continue
+            clipped.append(
+                DetectedPhone(
+                    phone.ipa,
+                    start,
+                    end,
+                    phone.confidence,
+                    phone.alternatives,
+                )
+            )
+        return tuple(clipped)
 
     def _ensure_model(self) -> tuple[Any, dict[int, str]]:
         if self._model is None:

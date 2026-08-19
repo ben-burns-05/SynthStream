@@ -22,8 +22,10 @@ from synthstream.decoding import (
 )
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
 from synthstream.offline.direct_phonemes import (
+    DIRECT_SAMPLE_RATE,
     DirectAliasPlanner,
     DirectIPARecognizer,
+    canonicalize_direct_audio,
 )
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.rendering import AliasEvent, allocate_alias_section_durations
@@ -171,6 +173,14 @@ class OfflineRecognizer:
 
         mono = np.asarray(np.mean(waveform, axis=1), dtype=np.float32)
         input_duration = len(mono) / source_rate
+        if self.phonemizer_capability.supported:
+            direct_mono = canonicalize_direct_audio(waveform, source_rate)
+            return self._recognize_direct(
+                source_path,
+                direct_mono,
+                DIRECT_SAMPLE_RATE,
+                input_duration,
+            )
         target_rate = self.extractor.config.sample_rate
         if source_rate != target_rate:
             divisor = math.gcd(source_rate, target_rate)
@@ -178,11 +188,6 @@ class OfflineRecognizer:
                 resample_poly(mono, target_rate // divisor, source_rate // divisor),
                 dtype=np.float32,
             )
-        if self.phonemizer_capability.supported:
-            return self._recognize_direct(
-                source_path, mono, target_rate, input_duration
-            )
-
         features = self.extractor.analyze(mono)
         if self.decoder is None:
             raise RuntimeError("acoustic decoder is unavailable for this mapped voicebank")
@@ -404,4 +409,3 @@ def _estimate_active_end_frame(
     end_seconds = min(len(samples) / sample_rate, (int(active[-1]) + 1) * window / sample_rate)
     end_seconds = min(len(samples) / sample_rate, math.ceil(end_seconds / 0.05) * 0.05)
     return min(frame_count, max(1, math.ceil(end_seconds / hop_seconds)))
-

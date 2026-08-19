@@ -19,6 +19,7 @@ from synthstream.audio import DuplexAudioBackend, RealtimeAudioStream
 from synthstream.decoding import DecodedSegment, DecoderConfig, SegmentalBeamDecoder
 from synthstream.matching import MatchWeights, SectionFeatureIndex, SectionMatcher
 from synthstream.offline.direct_phonemes import (
+    DIRECT_SAMPLE_RATE,
     DirectAliasPlanner,
     DirectIPARecognizer,
     DirectPlannedAlias,
@@ -117,6 +118,10 @@ class LiveVoicebankEngine:
         self.bank = bank
         self.extractor = FeatureExtractor(config)
         self.use_direct_ipa = use_direct_ipa
+        if use_direct_ipa and sample_rate != DIRECT_SAMPLE_RATE:
+            raise ValueError(
+                f"live direct-IPA mode requires {DIRECT_SAMPLE_RATE} Hz audio"
+            )
         self.track_pitch = track_pitch
         self.feature_index: SectionFeatureIndex | None
         self.decoder: SegmentalBeamDecoder | None
@@ -129,7 +134,7 @@ class LiveVoicebankEngine:
                 raise ValueError(
                     "live direct-IPA mode requires a supported English voicebank profile"
                 )
-            self.direct_recognizer = DirectIPARecognizer(normalize_input=True)
+            self.direct_recognizer = DirectIPARecognizer()
             self.direct_planner = DirectAliasPlanner(bank, capability.profile)
             self.feature_index = None
             self.decoder = None
@@ -430,15 +435,8 @@ class LiveVoicebankEngine:
         valid_end_seconds = actual_window_seconds - (
             context_right_samples / self.extractor.config.sample_rate
         )
-        minimum_context_samples = round(0.8 * self.extractor.config.sample_rate)
-        recognition_window = window
-        if len(recognition_window) < minimum_context_samples:
-            recognition_window = np.pad(
-                recognition_window,
-                (0, minimum_context_samples - len(recognition_window)),
-            ).astype(np.float32, copy=False)
         phones = self.direct_recognizer.recognize(
-            recognition_window,
+            window,
             self.extractor.config.sample_rate,
         )
         phones = tuple(
