@@ -36,6 +36,34 @@ def test_canonicalize_direct_audio_mixes_stereo_and_resamples() -> None:
     assert float(np.mean(canonical)) == pytest.approx(0.5, abs=0.01)
 
 
+def test_stable_phone_indices_require_an_ordered_stable_prefix() -> None:
+    previous = (
+        direct_phonemes.DetectedPhone("a", 0.00, 0.10, 0.9),
+        direct_phonemes.DetectedPhone("b", 0.10, 0.20, 0.9),
+        direct_phonemes.DetectedPhone("a", 0.20, 0.30, 0.9),
+    )
+    current = (
+        direct_phonemes.DetectedPhone("a", 0.01, 0.11, 0.9),
+        direct_phonemes.DetectedPhone("b", 0.11, 0.21, 0.9),
+        direct_phonemes.DetectedPhone("a", 0.21, 0.31, 0.9),
+    )
+
+    assert direct_phonemes.stable_phone_indices(previous, current) == (0, 1, 2)
+
+
+def test_stable_phone_indices_stop_at_the_first_changed_phone() -> None:
+    previous = (
+        direct_phonemes.DetectedPhone("a", 0.00, 0.10, 0.9),
+        direct_phonemes.DetectedPhone("b", 0.10, 0.20, 0.9),
+    )
+    current = (
+        direct_phonemes.DetectedPhone("e", 0.00, 0.10, 0.9),
+        direct_phonemes.DetectedPhone("b", 0.11, 0.21, 0.9),
+    )
+
+    assert direct_phonemes.stable_phone_indices(previous, current) == ()
+
+
 def test_direct_ipa_uses_canonical_feature_extraction_and_clips_padding(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

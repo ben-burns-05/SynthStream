@@ -140,6 +140,102 @@ def prepare_direct_window(
     return DirectRecognitionWindow(waveform, valid_start_seconds, valid_end)
 
 
+def stable_phone_indices(
+    previous: tuple[DetectedPhone, ...],
+    current: tuple[DetectedPhone, ...],
+    *,
+    match_tolerance_seconds: float = 0.16,
+    boundary_tolerance_seconds: float = 0.08,
+) -> tuple[int, ...]:
+    """Return current-phone indices supported by the preceding hypothesis.
+
+    The alignment is ordered and one-to-one, so repeated phones cannot all
+    collapse onto the first matching label.  A match is considered stable only
+    when both its label and estimated boundaries remain close; the looser anchor
+    tolerance lets the decoder align a phone before making the stricter commit
+    decision.
+    """
+    if not previous or not current:
+        return ()
+    if (
+        not math.isfinite(match_tolerance_seconds)
+        or match_tolerance_seconds <= 0
+        or not math.isfinite(boundary_tolerance_seconds)
+        or boundary_tolerance_seconds <= 0
+    ):
+        raise ValueError("phone alignment tolerances must be finite and positive")
+
+    def match_score(left: DetectedPhone, right: DetectedPhone) -> tuple[float, bool] | None:
+        if left.ipa != right.ipa:
+            return None
+        left_anchor = (left.start_seconds + left.end_seconds) / 2
+        right_anchor = (right.start_seconds + right.end_seconds) / 2
+        anchor_error = abs(left_anchor - right_anchor)
+        duration = max(
+            left.end_seconds - left.start_seconds,
+            right.end_seconds - right.start_seconds,
+        )
+        anchor_limit = max(match_tolerance_seconds, duration * 0.75)
+        if anchor_error > anchor_limit:
+            return None
+        boundary_error = max(
+            abs(left.start_seconds - right.start_seconds),
+            abs(left.end_seconds - right.end_seconds),
+        )
+        boundary_limit = max(boundary_tolerance_seconds, duration * 0.5)
+        stable = boundary_error <= boundary_limit
+        # Matching labels is more important than tiny timing differences, while
+        # still preferring the closest ordered candidate for repeated phones.
+        score = 1.0 - min(anchor_error / anchor_limit, 1.0) * 0.25
+        return score, stable
+
+    rows = len(previous)
+    columns = len(current)
+    scores = [[0.0] * (columns + 1) for _ in range(rows + 1)]
+    matches: list[list[tuple[int, int] | None]] = [
+        [None] * (columns + 1) for _ in range(rows + 1)
+    ]
+    for row in range(1, rows + 1):
+        for column in range(1, columns + 1):
+            best_score = max(scores[row - 1][column], scores[row][column - 1])
+            best_match: tuple[int, int] | None = None
+            candidate = match_score(previous[row - 1], current[column - 1])
+            if candidate is not None:
+                candidate_score, _ = candidate
+                diagonal_score = scores[row - 1][column - 1] + candidate_score
+                if diagonal_score >= best_score:
+                    best_score = diagonal_score
+                    best_match = (row - 1, column - 1)
+            scores[row][column] = best_score
+            matches[row][column] = best_match
+
+    aligned: list[tuple[int, int]] = []
+    row, column = rows, columns
+    while row and column:
+        match = matches[row][column]
+        if match is not None:
+            aligned.append(match)
+            row -= 1
+            column -= 1
+        elif scores[row - 1][column] >= scores[row][column - 1]:
+            row -= 1
+        else:
+            column -= 1
+    aligned.reverse()
+    stable: list[int] = []
+    for previous_index, current_index in aligned:
+        candidate = match_score(previous[previous_index], current[current_index])
+        if candidate is not None and candidate[1]:
+            stable.append(current_index)
+    stable_set = set(stable)
+    prefix: list[int] = []
+    for current_index in range(len(current)):
+        if current_index not in stable_set:
+            break
+        prefix.append(current_index)
+    return tuple(prefix)
+
+
 class DirectIPARecognizer:
     """CTC phone recognizer that never creates words or invokes G2P."""
 

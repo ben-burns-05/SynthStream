@@ -22,7 +22,9 @@ from synthstream.offline.direct_phonemes import (
     DIRECT_SAMPLE_RATE,
     DirectAliasPlanner,
     DirectIPARecognizer,
+    DirectPhoneticRecognition,
     DirectPlannedAlias,
+    stable_phone_indices,
 )
 from synthstream.offline.voicebank_phonemizer import detect_voicebank_profile
 from synthstream.pitch import PitchTransfer
@@ -177,6 +179,8 @@ class LiveVoicebankEngine:
         self._direct_emitted_seconds = 0.0
         self._direct_utterance_audio = np.empty(0, dtype=np.float32)
         self._direct_utterance_start_samples = 0
+        self._direct_previous_recognition: DirectPhoneticRecognition | None = None
+        self._direct_previous_cutoff_seconds = 0.0
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
@@ -252,6 +256,8 @@ class LiveVoicebankEngine:
         self._direct_emitted_seconds = 0.0
         self._direct_utterance_audio = np.empty(0, dtype=np.float32)
         self._direct_utterance_start_samples = 0
+        self._direct_previous_recognition = None
+        self._direct_previous_cutoff_seconds = 0.0
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
@@ -478,14 +484,53 @@ class LiveVoicebankEngine:
         cutoff = window_end_seconds if final else max(
             0.0, window_end_seconds - self.direct_commit_lag_seconds
         )
+        window_start_seconds = window_start_samples / self.extractor.config.sample_rate
+        aliases_to_commit = recognition.aliases
+        if not final:
+            # Keep the newest hypothesis mutable.  The current prefix must agree
+            # with the preceding window before its aliases can be emitted; an
+            # older prefix is retired only after it has crossed both windows'
+            # safe frontiers.
+            previous = self._direct_previous_recognition
+            stable_indices = (
+                stable_phone_indices(previous.phones, recognition.phones)
+                if previous is not None
+                else ()
+            )
+            stable_index_set = set(stable_indices)
+            stable_aliases = tuple(
+                alias
+                for alias in recognition.aliases
+                if alias.phone_indices
+                and all(index in stable_index_set for index in alias.phone_indices)
+            )
+            retired_aliases: tuple[DirectPlannedAlias, ...] = ()
+            if previous is not None:
+                retired_aliases = tuple(
+                    alias
+                    for alias in previous.aliases
+                    if alias.end_seconds <= self._direct_previous_cutoff_seconds + 1e-6
+                    and alias.end_seconds <= window_start_seconds + 1e-6
+                )
+            aliases_to_commit = tuple(
+                sorted(
+                    (*retired_aliases, *stable_aliases),
+                    key=lambda alias: (alias.start_seconds, alias.end_seconds),
+                )
+            )
+            self._direct_previous_recognition = recognition
+            self._direct_previous_cutoff_seconds = cutoff
         segments = self._direct_segments(
-            recognition.aliases,
+            aliases_to_commit,
             cutoff,
             pitch_audio=window,
             pitch_audio_start_samples=window_start_samples,
         )
         self._consume_committed(segments)
         self._direct_samples_since_update = 0
+        if final:
+            self._direct_previous_recognition = None
+            self._direct_previous_cutoff_seconds = 0.0
         with self._statistics_lock:
             self._direct_ipa_updates += 1
 
