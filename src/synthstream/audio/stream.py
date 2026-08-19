@@ -101,15 +101,31 @@ class RealtimeAudioStream:
         sample_rate: int = 16_000,
         block_size: int = 320,
         buffer_duration_seconds: float = 1.0,
+        startup_buffer_seconds: float = 0.0,
     ) -> None:
-        if sample_rate < 1 or block_size < 1 or buffer_duration_seconds <= 0:
-            raise ValueError("stream configuration values must be positive")
+        if (
+            sample_rate < 1
+            or block_size < 1
+            or buffer_duration_seconds <= 0
+            or startup_buffer_seconds < 0
+        ):
+            raise ValueError("stream configuration values are invalid")
         capacity = max(block_size, round(sample_rate * buffer_duration_seconds))
+        if startup_buffer_seconds > buffer_duration_seconds:
+            raise ValueError(
+                "startup_buffer_seconds cannot exceed buffer_duration_seconds"
+            )
         self.backend = backend
         self.sample_rate = sample_rate
         self.block_size = block_size
         self.input_buffer = AudioRingBuffer(capacity)
         self.output_buffer = AudioRingBuffer(capacity)
+        self._startup_buffer_samples = max(
+            0, round(sample_rate * startup_buffer_seconds)
+        )
+        self._output_primed = self._startup_buffer_samples == 0
+        self._output_consumed_samples = 0
+        self._expected_silence_until_samples = 0
         self._running = False
         self._statistics_lock = Lock()
         self._input_overflow_samples = 0
@@ -134,6 +150,9 @@ class RealtimeAudioStream:
     def start(self) -> None:
         if self._running:
             raise RuntimeError("audio stream is already running")
+        self._output_primed = self._startup_buffer_samples == 0
+        self._output_consumed_samples = 0
+        self._expected_silence_until_samples = 0
         self.backend.start(self.sample_rate, self.block_size, self._audio_callback)
         self._running = True
 
@@ -146,6 +165,17 @@ class RealtimeAudioStream:
         """Read captured microphone samples from a worker thread."""
         return self.input_buffer.read(sample_count)
 
+    @property
+    def output_clock_samples(self) -> int:
+        """Physical output samples consumed since startup priming."""
+        return self._output_consumed_samples
+
+    def allow_silence_until(self, sample_count: int) -> None:
+        """Mark a known silent output interval so it is not an underflow."""
+        self._expected_silence_until_samples = max(
+            self._expected_silence_until_samples, int(sample_count)
+        )
+
     def write_output(self, samples: AudioSamples) -> int:
         """Queue rendered output, returning samples dropped to bound latency."""
         dropped = self.output_buffer.write(samples)
@@ -156,11 +186,36 @@ class RealtimeAudioStream:
 
     def _audio_callback(self, input_samples: AudioSamples, status: str | None) -> AudioSamples:
         input_dropped = self.input_buffer.write(input_samples)
+        # The device must receive samples from the first callback, but the
+        # worker is allowed a bounded startup window to produce the first
+        # timeline chunk.  This silence is intentional and must not be counted
+        # as a producer underflow.  Once primed, every missing sample is a real
+        # transport starvation and remains observable.
+        if not self._output_primed:
+            if self.output_buffer.available_samples >= self._startup_buffer_samples:
+                self._output_primed = True
+            else:
+                if input_dropped or status:
+                    with self._statistics_lock:
+                        self._input_overflow_samples += input_dropped
+                        if status:
+                            self._callback_statuses.append(status)
+                return np.zeros(len(input_samples), dtype=np.float32)
+        clock_before = self._output_consumed_samples
+        self._output_consumed_samples += len(input_samples)
         output, output_missing = self.output_buffer.read_padded(len(input_samples))
-        if input_dropped or output_missing or status:
+        expected_silence = max(
+            0,
+            min(
+                output_missing,
+                self._expected_silence_until_samples - clock_before,
+            ),
+        )
+        counted_missing = output_missing - expected_silence
+        if input_dropped or counted_missing or status:
             with self._statistics_lock:
                 self._input_overflow_samples += input_dropped
-                self._output_underflow_samples += output_missing
+                self._output_underflow_samples += counted_missing
                 if status:
                     self._callback_statuses.append(status)
         return output
@@ -214,4 +269,3 @@ class FakeDuplexAudioBackend:
         result = np.concatenate(self._captured).astype(np.float32, copy=False)
         self._captured.clear()
         return result
-

@@ -43,6 +43,41 @@ def test_output_underflow_produces_silence_and_is_observable() -> None:
     assert stream.statistics.callback_statuses == ("input overflow",)
 
 
+def test_startup_priming_is_silence_without_reporting_underflow() -> None:
+    backend = FakeDuplexAudioBackend()
+    stream = RealtimeAudioStream(
+        backend,
+        sample_rate=1_000,
+        block_size=4,
+        buffer_duration_seconds=1.0,
+        startup_buffer_seconds=0.01,
+    )
+    stream.start()
+
+    assert np.array_equal(backend.feed(np.ones(4, dtype=np.float32)), np.zeros(4))
+    assert stream.statistics.output_underflow_samples == 0
+    assert stream.output_clock_samples == 0
+
+    stream.write_output(np.arange(12, dtype=np.float32))
+    output = backend.feed(np.ones(4, dtype=np.float32))
+
+    assert np.array_equal(output, np.arange(4, dtype=np.float32))
+    assert stream.statistics.output_underflow_samples == 0
+    assert stream.output_clock_samples == 4
+
+
+def test_known_silence_watermark_is_not_reported_as_underflow() -> None:
+    backend = FakeDuplexAudioBackend()
+    stream = RealtimeAudioStream(backend, sample_rate=1_000, block_size=4)
+    stream.start()
+    stream.allow_silence_until(4)
+
+    output = backend.feed(np.ones(4, dtype=np.float32))
+
+    assert np.array_equal(output, np.zeros(4))
+    assert stream.statistics.output_underflow_samples == 0
+
+
 def test_input_and_output_buffers_remain_bounded() -> None:
     backend = FakeDuplexAudioBackend()
     stream = RealtimeAudioStream(

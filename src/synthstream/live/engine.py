@@ -148,12 +148,6 @@ class LiveVoicebankEngine:
             self.streaming_decoder = self.decoder.stream(lookahead_frames=lookahead_frames)
         self.renderer = VoicebankRenderer(output_gain=output_gain)
         self.pitch_transfer = PitchTransfer()
-        self.stream = RealtimeAudioStream(
-            backend,
-            sample_rate=sample_rate,
-            block_size=block_size,
-            buffer_duration_seconds=buffer_duration_seconds,
-        )
         self.pitch_ratio = pitch_ratio
         self.analysis_chunk_samples = max(1, round(analysis_chunk_seconds * sample_rate))
         self.direct_window_samples = max(1, round(direct_window_seconds * sample_rate))
@@ -172,6 +166,16 @@ class LiveVoicebankEngine:
             sample_rate,
             staging_seconds=0.12,
         )
+        # Give the worker a short bounded window to enqueue the first voiced
+        # event.  Subsequent timeline gaps are queued explicitly by the live
+        # scheduler, so the callback is never asked to infer transport timing.
+        self.stream = RealtimeAudioStream(
+            backend,
+            sample_rate=sample_rate,
+            block_size=block_size,
+            buffer_duration_seconds=buffer_duration_seconds,
+            startup_buffer_seconds=0.12,
+        )
         self._pending_input = np.empty(0, dtype=np.float32)
         self._direct_audio = np.empty(0, dtype=np.float32)
         self._direct_total_samples = 0
@@ -184,6 +188,8 @@ class LiveVoicebankEngine:
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
+        self._live_output_started = False
+        self._live_timeline_origin_samples: int | None = None
         self._emitted_output_samples = 0
         self._input_blocks_processed = 0
         self._feature_chunks_processed = 0
@@ -261,6 +267,8 @@ class LiveVoicebankEngine:
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
+        self._live_output_started = False
+        self._live_timeline_origin_samples = None
         self._emitted_output_samples = 0
         self._render_scheduler.reset()
         self.stream.input_buffer.clear()
@@ -383,6 +391,18 @@ class LiveVoicebankEngine:
                     self._direct_quiet_samples = 0
                     self._direct_speech_seen = False
                     endpoint_reached = True
+            if (
+                self._live_output_started
+                and self._live_timeline_origin_samples is not None
+                and self._input_rms < self.direct_silence_rms_threshold
+            ):
+                self.stream.allow_silence_until(
+                    max(
+                        0,
+                        self._direct_total_samples
+                        - self._live_timeline_origin_samples,
+                    )
+                )
             if not endpoint_reached:
                 self._process_direct_update()
             feature_count = 0
@@ -619,20 +639,65 @@ class LiveVoicebankEngine:
     def _consume_committed(self, segments: tuple[DecodedSegment, ...]) -> None:
         for segment in segments:
             hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
+            start_seconds = segment.start_frame * hop_seconds
+            end_seconds = segment.end_frame * hop_seconds
+            start_sample = round(start_seconds * self.stream.sample_rate)
+            end_sample = round(end_seconds * self.stream.sample_rate)
+            if self._live_timeline_origin_samples is None:
+                self._live_timeline_origin_samples = start_sample
+            include_leading_gap = self._live_output_started
+            if self._live_output_started:
+                # The callback is the authoritative output clock.  A worker
+                # update can arrive after the device has already played past
+                # its source interval (most visibly after long silence).  Do
+                # not enqueue that stale interval or replay its old gap.
+                playback_frontier = (
+                    self._live_timeline_origin_samples
+                    + self.stream.output_clock_samples
+                )
+                if end_sample <= playback_frontier:
+                    include_leading_gap = False
+                    start_seconds = end_seconds
+                elif start_sample < playback_frontier:
+                    start_seconds = playback_frontier / self.stream.sample_rate
+                    include_leading_gap = False
             render_segment = RenderSegment(
                 unit_id=segment.unit_id,
                 alias=segment.alias,
                 section_index=segment.section_index,
                 section_kind=segment.section_kind,
-                start_seconds=segment.start_frame * hop_seconds,
-                end_seconds=segment.end_frame * hop_seconds,
+                start_seconds=start_seconds,
+                end_seconds=end_seconds,
                 pitch_ratio=self.pitch_ratio * segment.pitch_ratio,
             )
+            leading_gap_limit: int | None = None
+            if include_leading_gap:
+                target_samples = max(0, end_sample - round(start_seconds * self.stream.sample_rate))
+                reserve_samples = max(
+                    self.stream.block_size,
+                    round(0.12 * self.stream.sample_rate),
+                    target_samples,
+                )
+                free_samples = (
+                    self.stream.output_buffer.capacity_samples
+                    - self.stream.output_buffer.available_samples
+                )
+                # Long gaps are normally already being emitted by the device
+                # while the recognizer catches up.  Queue only a short future
+                # gap; retaining a multi-second gap would fill the bounded
+                # ring and then burst the following voiced sections.
+                leading_gap_limit = min(
+                    max(0, free_samples - reserve_samples),
+                    round(0.25 * self.stream.sample_rate),
+                )
             result = self._render_scheduler.append(
                 render_segment,
-                include_leading_gap=False,
+                include_leading_gap=include_leading_gap,
+                leading_gap_limit_samples=leading_gap_limit,
             )
             self._write_released(result.released)
+            if result.rendered:
+                self._live_output_started = True
             self._emitted_output_samples = self._render_scheduler.scheduled_samples
             with self._statistics_lock:
                 self._committed_segments += 1

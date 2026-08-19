@@ -81,3 +81,27 @@ def test_live_append_does_not_backfill_elapsed_timeline_gap(tmp_path: Path) -> N
 
     assert len(result.released) == result.target_samples
     assert scheduler.scheduled_samples == round(1.05 * SAMPLE_RATE)
+
+
+def test_live_gap_limit_keeps_bounded_queue_from_filling_with_old_silence(
+    tmp_path: Path,
+) -> None:
+    _make_bank(tmp_path)
+    bank = load_voicebank(tmp_path, use_cache=False)
+    scheduler = VoicebankRenderScheduler(
+        bank,
+        VoicebankRenderer(),
+        SAMPLE_RATE,
+        staging_seconds=0.0,
+    )
+    unit = bank.units[0]
+
+    scheduler.append(_segment(unit.id, unit.alias, 0, 0.0, 0.05))
+    result = scheduler.append(
+        _segment(unit.id, unit.alias, 0, 1.0, 1.05),
+        include_leading_gap=True,
+        leading_gap_limit_samples=100,
+    )
+
+    assert len(result.released) < round(0.2 * SAMPLE_RATE)
+    assert scheduler.scheduled_samples == round(1.05 * SAMPLE_RATE)

@@ -87,13 +87,14 @@ class VoicebankRenderScheduler:
         segment: RenderSegment,
         *,
         include_leading_gap: bool = True,
+        leading_gap_limit_samples: int | None = None,
     ) -> RenderAppend:
         """Schedule one silence or voiced section and return immutable output.
 
         Offline rendering includes timeline gaps as explicit silence. Live
-        playback leaves already-elapsed gaps to the device callback, which
-        naturally outputs silence instead of backfilling seconds of zeros into
-        the realtime output queue.
+        callers may anchor the first event and bound later leading gaps with
+        ``leading_gap_limit_samples``; the physical output clock can then
+        cover older silence while the worker catches up.
         """
         start_sample = max(0, round(segment.start_seconds * self.output_sample_rate))
         end_sample = max(start_sample, round(segment.end_seconds * self.output_sample_rate))
@@ -101,9 +102,18 @@ class VoicebankRenderScheduler:
             return RenderAppend(_empty_audio(), 0, 0, False)
 
         released = _empty_audio()
-        if include_leading_gap and start_sample > self._scheduled_samples:
+        if leading_gap_limit_samples is not None and leading_gap_limit_samples < 0:
+            raise ValueError("leading_gap_limit_samples must be non-negative")
+        gap_samples = max(0, start_sample - self._scheduled_samples)
+        if include_leading_gap and gap_samples:
+            if leading_gap_limit_samples is not None:
+                gap_samples = min(gap_samples, leading_gap_limit_samples)
+                # A bounded live queue cannot retain an arbitrarily old
+                # silence interval.  Keep the most recent part of the gap;
+                # the device has already emitted the discarded prefix.
+                self._scheduled_samples = start_sample - gap_samples
             released = self._composer.append(
-                np.zeros(start_sample - self._scheduled_samples, dtype=np.float32),
+                np.zeros(gap_samples, dtype=np.float32),
                 overlap_samples=0,
             )
             self._scheduled_samples = start_sample
