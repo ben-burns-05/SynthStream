@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -41,6 +42,25 @@ AudioSamples = npt.NDArray[np.float32]
 
 
 @dataclass(frozen=True, slots=True)
+class LiveDiagnosticEvent:
+    """One live scheduling event captured for E2E timing diagnosis."""
+
+    kind: str
+    monotonic_seconds: float
+    unit_id: str | None
+    alias: str | None
+    source_start_seconds: float
+    source_end_seconds: float
+    playback_frontier_samples: int
+    samples: int
+    render_duration_seconds: float
+    output_buffer_before_samples: int
+    output_buffer_after_samples: int
+    released_samples: int
+    scheduled_samples: int
+
+
+@dataclass(frozen=True, slots=True)
 class LiveEngineStatistics:
     """Observable work and failure counters for one live engine."""
 
@@ -58,6 +78,13 @@ class LiveEngineStatistics:
     worker_error: str | None
     input_peak_max: float
     input_clipped_samples: int
+    alias_render_count: int = 0
+    alias_render_seconds: float = 0.0
+    alias_render_max_seconds: float = 0.0
+    late_alias_groups_dropped: int = 0
+    late_alias_groups_trimmed: int = 0
+    late_alias_trimmed_samples: int = 0
+    diagnostic_events: tuple[LiveDiagnosticEvent, ...] = ()
 
 
 class LiveVoicebankEngine:
@@ -204,6 +231,13 @@ class LiveVoicebankEngine:
         self._input_rms = 0.0
         self._input_peak_max = 0.0
         self._input_clipped_samples = 0
+        self._alias_render_count = 0
+        self._alias_render_seconds = 0.0
+        self._alias_render_max_seconds = 0.0
+        self._late_alias_groups_dropped = 0
+        self._late_alias_groups_trimmed = 0
+        self._late_alias_trimmed_samples = 0
+        self._diagnostic_events: deque[LiveDiagnosticEvent] = deque(maxlen=512)
         self._worker_error: str | None = None
         self._statistics_lock = Lock()
         self._worker_stop = Event()
@@ -247,6 +281,13 @@ class LiveVoicebankEngine:
                 self._worker_error,
                 self._input_peak_max,
                 self._input_clipped_samples,
+                self._alias_render_count,
+                self._alias_render_seconds,
+                self._alias_render_max_seconds,
+                self._late_alias_groups_dropped,
+                self._late_alias_groups_trimmed,
+                self._late_alias_trimmed_samples,
+                tuple(self._diagnostic_events),
             )
 
     def start(self, *, background: bool = True) -> None:
@@ -279,6 +320,13 @@ class LiveVoicebankEngine:
         self._input_rms = 0.0
         self._input_peak_max = 0.0
         self._input_clipped_samples = 0
+        self._alias_render_count = 0
+        self._alias_render_seconds = 0.0
+        self._alias_render_max_seconds = 0.0
+        self._late_alias_groups_dropped = 0
+        self._late_alias_groups_trimmed = 0
+        self._late_alias_trimmed_samples = 0
+        self._diagnostic_events.clear()
         self.stream.start()
         if background:
             self._worker = Thread(target=self._worker_loop, name="synthstream-live", daemon=True)
@@ -677,6 +725,8 @@ class LiveVoicebankEngine:
     def _consume_alias_group(self, segments: tuple[DecodedSegment, ...]) -> None:
         first = segments[0]
         last = segments[-1]
+        if first.unit_id is None:
+            return
         hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
         start_seconds = first.start_frame * hop_seconds
         end_seconds = last.end_frame * hop_seconds
@@ -685,6 +735,8 @@ class LiveVoicebankEngine:
         if self._live_timeline_origin_samples is None:
             self._live_timeline_origin_samples = start_sample
         include_leading_gap = self._live_output_started
+        playback_frontier = 0
+        output_buffer_before = self.stream.output_buffer.available_samples
         if self._live_output_started:
             playback_frontier = (
                 self._live_timeline_origin_samples + self.stream.output_clock_samples
@@ -692,10 +744,49 @@ class LiveVoicebankEngine:
             if end_sample <= playback_frontier:
                 with self._statistics_lock:
                     self._committed_segments += len(segments)
+                    self._late_alias_groups_dropped += 1
+                    self._diagnostic_events.append(
+                        LiveDiagnosticEvent(
+                            "alias_late_drop",
+                            time.perf_counter(),
+                            first.unit_id,
+                            first.alias,
+                            start_seconds,
+                            end_seconds,
+                            playback_frontier,
+                            max(0, end_sample - start_sample),
+                            0.0,
+                            output_buffer_before,
+                            output_buffer_before,
+                            0,
+                            self._render_scheduler.scheduled_samples,
+                        )
+                    )
                 return
             if start_sample < playback_frontier:
+                trimmed_samples = playback_frontier - start_sample
                 start_seconds = playback_frontier / self.stream.sample_rate
                 include_leading_gap = False
+                with self._statistics_lock:
+                    self._late_alias_groups_trimmed += 1
+                    self._late_alias_trimmed_samples += trimmed_samples
+                    self._diagnostic_events.append(
+                        LiveDiagnosticEvent(
+                            "alias_late_trim",
+                            time.perf_counter(),
+                            first.unit_id,
+                            first.alias,
+                            start_sample / self.stream.sample_rate,
+                            end_seconds,
+                            playback_frontier,
+                            trimmed_samples,
+                            0.0,
+                            output_buffer_before,
+                            output_buffer_before,
+                            0,
+                            self._render_scheduler.scheduled_samples,
+                        )
+                    )
         event = AliasEvent(
             unit_id=first.unit_id,
             alias=first.alias or first.unit_id,
@@ -723,28 +814,57 @@ class LiveVoicebankEngine:
                 max(0, free_samples - reserve_samples),
                 round(0.25 * self.stream.sample_rate),
             )
+        render_started = time.perf_counter()
         result = self._render_scheduler.append_alias(
             event,
             include_leading_gap=include_leading_gap,
             leading_gap_limit_samples=leading_gap_limit,
         )
+        render_duration = time.perf_counter() - render_started
         self._write_released(result.released)
+        output_buffer_after = self.stream.output_buffer.available_samples
         if result.rendered:
             self._live_output_started = True
         self._emitted_output_samples = self._render_scheduler.scheduled_samples
         with self._statistics_lock:
             self._committed_segments += len(segments)
+            self._alias_render_count += 1
+            self._alias_render_seconds += render_duration
+            self._alias_render_max_seconds = max(
+                self._alias_render_max_seconds,
+                render_duration,
+            )
+            self._diagnostic_events.append(
+                LiveDiagnosticEvent(
+                    "alias_render",
+                    time.perf_counter(),
+                    first.unit_id,
+                    first.alias,
+                    start_seconds,
+                    end_seconds,
+                    playback_frontier,
+                    result.target_samples,
+                    render_duration,
+                    output_buffer_before,
+                    output_buffer_after,
+                    len(result.released),
+                    self._render_scheduler.scheduled_samples,
+                )
+            )
 
     def _consume_section_segments(self, segments: tuple[DecodedSegment, ...]) -> None:
         for segment in segments:
             hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
             start_seconds = segment.start_frame * hop_seconds
             end_seconds = segment.end_frame * hop_seconds
+            source_start_seconds = start_seconds
             start_sample = round(start_seconds * self.stream.sample_rate)
             end_sample = round(end_seconds * self.stream.sample_rate)
             if self._live_timeline_origin_samples is None:
                 self._live_timeline_origin_samples = start_sample
             include_leading_gap = self._live_output_started
+            playback_frontier = 0
+            output_buffer_before = self.stream.output_buffer.available_samples
             if self._live_output_started:
                 # The callback is the authoritative output clock.  A worker
                 # update can arrive after the device has already played past
@@ -757,9 +877,46 @@ class LiveVoicebankEngine:
                 if end_sample <= playback_frontier:
                     include_leading_gap = False
                     start_seconds = end_seconds
+                    with self._statistics_lock:
+                        self._diagnostic_events.append(
+                            LiveDiagnosticEvent(
+                                "section_late_drop",
+                                time.perf_counter(),
+                                segment.unit_id,
+                                segment.alias,
+                                source_start_seconds,
+                                end_seconds,
+                                playback_frontier,
+                                max(0, end_sample - start_sample),
+                                0.0,
+                                output_buffer_before,
+                                output_buffer_before,
+                                0,
+                                self._render_scheduler.scheduled_samples,
+                            )
+                        )
                 elif start_sample < playback_frontier:
+                    trimmed_samples = playback_frontier - start_sample
                     start_seconds = playback_frontier / self.stream.sample_rate
                     include_leading_gap = False
+                    with self._statistics_lock:
+                        self._diagnostic_events.append(
+                            LiveDiagnosticEvent(
+                                "section_late_trim",
+                                time.perf_counter(),
+                                segment.unit_id,
+                                segment.alias,
+                                source_start_seconds,
+                                end_seconds,
+                                playback_frontier,
+                                trimmed_samples,
+                                0.0,
+                                output_buffer_before,
+                                output_buffer_before,
+                                0,
+                                self._render_scheduler.scheduled_samples,
+                            )
+                        )
             render_segment = RenderSegment(
                 unit_id=segment.unit_id,
                 alias=segment.alias,
@@ -789,17 +946,38 @@ class LiveVoicebankEngine:
                     max(0, free_samples - reserve_samples),
                     round(0.25 * self.stream.sample_rate),
                 )
+            render_started = time.perf_counter()
             result = self._render_scheduler.append(
                 render_segment,
                 include_leading_gap=include_leading_gap,
                 leading_gap_limit_samples=leading_gap_limit,
             )
+            render_duration = time.perf_counter() - render_started
             self._write_released(result.released)
+            output_buffer_after = self.stream.output_buffer.available_samples
             if result.rendered:
                 self._live_output_started = True
             self._emitted_output_samples = self._render_scheduler.scheduled_samples
             with self._statistics_lock:
                 self._committed_segments += 1
+                if result.rendered:
+                    self._diagnostic_events.append(
+                        LiveDiagnosticEvent(
+                            "section_render",
+                            time.perf_counter(),
+                            segment.unit_id,
+                            segment.alias,
+                            source_start_seconds,
+                            end_seconds,
+                            playback_frontier,
+                            result.target_samples,
+                            render_duration,
+                            output_buffer_before,
+                            output_buffer_after,
+                            len(result.released),
+                            self._render_scheduler.scheduled_samples,
+                        )
+                    )
 
     def _write_released(self, samples: AudioSamples) -> None:
         if not len(samples):

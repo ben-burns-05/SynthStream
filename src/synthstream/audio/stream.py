@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,6 +33,22 @@ class DuplexAudioBackend(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class StreamDiagnosticEvent:
+    """One transport event useful when explaining a live-output gap."""
+
+    kind: str
+    monotonic_seconds: float
+    output_clock_samples: int
+    input_buffer_samples: int
+    output_buffer_before_samples: int
+    output_buffer_after_samples: int
+    callback_samples: int
+    missing_samples: int = 0
+    status: str | None = None
+    callback_duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class StreamStatistics:
     """Snapshot of observable transport failures and buffer pressure."""
 
@@ -39,6 +56,11 @@ class StreamStatistics:
     output_overflow_samples: int
     output_underflow_samples: int
     callback_statuses: tuple[str, ...]
+    callback_count: int = 0
+    callback_duration_max_seconds: float = 0.0
+    output_buffer_min_samples: int = 0
+    output_buffer_max_samples: int = 0
+    diagnostic_events: tuple[StreamDiagnosticEvent, ...] = ()
 
 
 class SoundDeviceDuplexBackend:
@@ -132,6 +154,11 @@ class RealtimeAudioStream:
         self._output_overflow_samples = 0
         self._output_underflow_samples = 0
         self._callback_statuses: deque[str] = deque(maxlen=32)
+        self._callback_count = 0
+        self._callback_duration_max_seconds = 0.0
+        self._output_buffer_min_samples: int | None = None
+        self._output_buffer_max_samples = 0
+        self._diagnostic_events: deque[StreamDiagnosticEvent] = deque(maxlen=512)
 
     @property
     def is_running(self) -> bool:
@@ -145,6 +172,13 @@ class RealtimeAudioStream:
                 self._output_overflow_samples,
                 self._output_underflow_samples,
                 tuple(self._callback_statuses),
+                self._callback_count,
+                self._callback_duration_max_seconds,
+                0
+                if self._output_buffer_min_samples is None
+                else self._output_buffer_min_samples,
+                self._output_buffer_max_samples,
+                tuple(self._diagnostic_events),
             )
 
     def start(self) -> None:
@@ -185,6 +219,8 @@ class RealtimeAudioStream:
         return dropped
 
     def _audio_callback(self, input_samples: AudioSamples, status: str | None) -> AudioSamples:
+        callback_started = time.perf_counter()
+        output_buffer_before = self.output_buffer.available_samples
         input_dropped = self.input_buffer.write(input_samples)
         # The device must receive samples from the first callback, but the
         # worker is allowed a bounded startup window to produce the first
@@ -200,10 +236,16 @@ class RealtimeAudioStream:
                         self._input_overflow_samples += input_dropped
                         if status:
                             self._callback_statuses.append(status)
+                self._record_callback_measurement(
+                    callback_started,
+                    output_buffer_before,
+                    self.output_buffer.available_samples,
+                )
                 return np.zeros(len(input_samples), dtype=np.float32)
         clock_before = self._output_consumed_samples
         self._output_consumed_samples += len(input_samples)
         output, output_missing = self.output_buffer.read_padded(len(input_samples))
+        output_buffer_after = self.output_buffer.available_samples
         expected_silence = max(
             0,
             min(
@@ -212,13 +254,76 @@ class RealtimeAudioStream:
             ),
         )
         counted_missing = output_missing - expected_silence
+        callback_duration = self._record_callback_measurement(
+            callback_started,
+            output_buffer_before,
+            output_buffer_after,
+        )
         if input_dropped or counted_missing or status:
             with self._statistics_lock:
                 self._input_overflow_samples += input_dropped
                 self._output_underflow_samples += counted_missing
                 if status:
                     self._callback_statuses.append(status)
+                if counted_missing:
+                    self._diagnostic_events.append(
+                        StreamDiagnosticEvent(
+                            "output_underflow",
+                            time.perf_counter(),
+                            clock_before,
+                            self.input_buffer.available_samples,
+                            output_buffer_before,
+                            output_buffer_after,
+                            len(input_samples),
+                            counted_missing,
+                            status,
+                            callback_duration,
+                        )
+                    )
+                if status:
+                    self._diagnostic_events.append(
+                        StreamDiagnosticEvent(
+                            "callback_status",
+                            time.perf_counter(),
+                            clock_before,
+                            self.input_buffer.available_samples,
+                            output_buffer_before,
+                            output_buffer_after,
+                            len(input_samples),
+                            0,
+                            status,
+                            callback_duration,
+                        )
+                    )
         return output
+
+    def _record_callback_measurement(
+        self,
+        callback_started: float,
+        output_buffer_before: int,
+        output_buffer_after: int,
+    ) -> float:
+        """Update cheap callback/buffer aggregates and return callback duration."""
+        duration = time.perf_counter() - callback_started
+        self._callback_count += 1
+        self._callback_duration_max_seconds = max(
+            self._callback_duration_max_seconds,
+            duration,
+        )
+        observed_minimum = min(output_buffer_before, output_buffer_after)
+        if self._output_buffer_min_samples is None:
+            self._output_buffer_min_samples = observed_minimum
+        else:
+            self._output_buffer_min_samples = min(
+                self._output_buffer_min_samples,
+                observed_minimum,
+            )
+        self._output_buffer_max_samples = max(
+            self._output_buffer_max_samples,
+            output_buffer_before,
+            output_buffer_after,
+        )
+        return duration
 
 
 class FakeDuplexAudioBackend:

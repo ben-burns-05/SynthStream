@@ -7,6 +7,7 @@ import soundfile as sf
 
 from synthstream.analysis import AnalysisConfig
 from synthstream.audio import FakeDuplexAudioBackend
+from synthstream.decoding import DecodedSegment
 from synthstream.live import LiveVoicebankEngine
 from synthstream.offline.direct_phonemes import DetectedPhone
 from synthstream.voicebank import load_voicebank
@@ -64,6 +65,63 @@ def test_live_engine_moves_fake_microphone_through_decode_and_render(
     assert np.all(np.isfinite(queued))
     assert float(np.max(np.abs(queued))) > 0.01
     assert statistics.worker_error is None
+
+
+def test_live_engine_diagnostics_separate_render_and_late_alias_events(
+    tmp_path: Path,
+) -> None:
+    _make_bank(tmp_path)
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine(
+        load_voicebank(tmp_path, use_cache=False),
+        backend,
+        buffer_duration_seconds=2.0,
+        use_direct_ipa=False,
+    )
+    unit = engine.bank.units[0]
+    segment = DecodedSegment(
+        unit.id,
+        unit.alias,
+        0,
+        unit.sections[0].kind,
+        0,
+        8,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+
+    engine.start(background=False)
+    engine._consume_alias_group((segment,))
+    engine._live_output_started = True
+    engine._live_timeline_origin_samples = 0
+    engine.stream.write_output(np.zeros(3_000, dtype=np.float32))
+    backend.feed(np.zeros(2_560, dtype=np.float32))
+    late_segment = DecodedSegment(
+        unit.id,
+        unit.alias,
+        0,
+        unit.sections[0].kind,
+        0,
+        4,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    engine._consume_alias_group((late_segment,))
+    engine.stop()
+
+    statistics = engine.statistics
+    kinds = [event.kind for event in statistics.diagnostic_events]
+    assert "alias_render" in kinds
+    assert "alias_late_drop" in kinds
+    assert statistics.alias_render_count == 1
+    assert statistics.late_alias_groups_dropped == 1
+    assert statistics.alias_render_max_seconds >= 0.0
 
 
 def test_live_engine_retains_recent_raw_input_for_diagnostics(tmp_path: Path) -> None:

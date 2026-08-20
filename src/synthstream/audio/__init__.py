@@ -7,6 +7,7 @@ from synthstream.audio.stream import (
     FakeDuplexAudioBackend,
     RealtimeAudioStream,
     SoundDeviceDuplexBackend,
+    StreamDiagnosticEvent,
     StreamStatistics,
 )
 
@@ -18,6 +19,7 @@ __all__ = [
     "RealtimeAudioStream",
     "SoundDeviceDuplexBackend",
     "SoundDeviceSink",
+    "StreamDiagnosticEvent",
     "StreamStatistics",
     "WavFileSink",
 ]

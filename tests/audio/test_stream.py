@@ -43,6 +43,32 @@ def test_output_underflow_produces_silence_and_is_observable() -> None:
     assert stream.statistics.callback_statuses == ("input overflow",)
 
 
+def test_transport_diagnostics_capture_underflow_and_buffer_depth() -> None:
+    backend = FakeDuplexAudioBackend()
+    stream = RealtimeAudioStream(backend, sample_rate=1_000, block_size=4)
+    stream.write_output(np.array([0.5, 0.25], dtype=np.float32))
+    stream.start()
+
+    backend.feed(np.ones(4, dtype=np.float32), status="input overflow")
+
+    statistics = stream.statistics
+    stream.stop()
+
+    assert statistics.callback_count == 1
+    assert statistics.callback_duration_max_seconds >= 0.0
+    assert statistics.output_buffer_min_samples == 0
+    assert statistics.output_buffer_max_samples == 2
+    assert [event.kind for event in statistics.diagnostic_events] == [
+        "output_underflow",
+        "callback_status",
+    ]
+    underflow = statistics.diagnostic_events[0]
+    assert underflow.output_buffer_before_samples == 2
+    assert underflow.output_buffer_after_samples == 0
+    assert underflow.missing_samples == 2
+    assert underflow.monotonic_seconds > 0
+
+
 def test_startup_priming_is_silence_without_reporting_underflow() -> None:
     backend = FakeDuplexAudioBackend()
     stream = RealtimeAudioStream(

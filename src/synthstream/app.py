@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
@@ -28,14 +29,24 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from synthstream.audio import DuplexAudioBackend, SoundDeviceDuplexBackend
-from synthstream.live import LiveVoicebankEngine
+from synthstream.audio import (
+    DuplexAudioBackend,
+    SoundDeviceDuplexBackend,
+    StreamDiagnosticEvent,
+)
+from synthstream.live import LiveDiagnosticEvent, LiveVoicebankEngine
 from synthstream.voicebank import Voicebank
 from synthstream.voicebank import load_voicebank as load_voicebank_data
 
 DeviceValue = int | str | None
 DeviceProvider = Callable[[], tuple[tuple[tuple[str, DeviceValue], ...], ...]]
 BackendFactory = Callable[[DeviceValue, DeviceValue], DuplexAudioBackend]
+
+
+def _diagnostic_event_dict(
+    event: LiveDiagnosticEvent | StreamDiagnosticEvent,
+) -> dict[str, Any]:
+    return asdict(event)
 
 
 class _MainPanel(QWidget):
@@ -409,6 +420,10 @@ class MainWindow(QMainWindow):
         if engine is not None:
             statistics = engine.statistics
             stream_stats = engine.stream.statistics
+            diagnostic_events = cast(
+                tuple[LiveDiagnosticEvent | StreamDiagnosticEvent, ...],
+                (*statistics.diagnostic_events, *stream_stats.diagnostic_events),
+            )
             report["engine"] = {
                 "statistics": {
                     "input_blocks_processed": statistics.input_blocks_processed,
@@ -423,6 +438,12 @@ class MainWindow(QMainWindow):
                     "input_rms": statistics.input_rms,
                     "input_peak_max": statistics.input_peak_max,
                     "input_clipped_samples": statistics.input_clipped_samples,
+                    "alias_render_count": statistics.alias_render_count,
+                    "alias_render_seconds": statistics.alias_render_seconds,
+                    "alias_render_max_seconds": statistics.alias_render_max_seconds,
+                    "late_alias_groups_dropped": statistics.late_alias_groups_dropped,
+                    "late_alias_groups_trimmed": statistics.late_alias_groups_trimmed,
+                    "late_alias_trimmed_samples": statistics.late_alias_trimmed_samples,
                     "worker_error": statistics.worker_error,
                 },
                 "stream": {
@@ -432,7 +453,15 @@ class MainWindow(QMainWindow):
                     "output_overflow_samples": stream_stats.output_overflow_samples,
                     "output_underflow_samples": stream_stats.output_underflow_samples,
                     "callback_statuses": list(stream_stats.callback_statuses),
+                    "callback_count": stream_stats.callback_count,
+                    "callback_duration_max_seconds": stream_stats.callback_duration_max_seconds,
+                    "output_buffer_min_samples": stream_stats.output_buffer_min_samples,
+                    "output_buffer_max_samples": stream_stats.output_buffer_max_samples,
                 },
+                "diagnostic_events": sorted(
+                    (_diagnostic_event_dict(event) for event in diagnostic_events),
+                    key=lambda event: event["monotonic_seconds"],
+                ),
             }
         try:
             Path(path).write_text(
