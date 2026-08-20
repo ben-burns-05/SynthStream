@@ -13,6 +13,7 @@ from synthstream.rendering import (
     VoicebankRenderer,
     allocate_alias_section_durations,
 )
+from synthstream.rendering import renderer as renderer_module
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -98,6 +99,32 @@ def test_alias_event_allocates_only_sustain_time(tmp_path: Path) -> None:
     durations = allocate_alias_section_durations(event, unit, timebase_hz=SAMPLE_RATE)
 
     assert durations == (800, 2_400, 8_800)
+
+
+def test_alias_render_applies_pitch_shift_once_before_section_stretching(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _make_sine_bank(tmp_path)
+    unit = load_voicebank(tmp_path, use_cache=False).units[0]
+    calls: list[int] = []
+    original = renderer_module._pitch_shift
+
+    def counted_pitch_shift(
+        samples: npt.NDArray[np.float32], sample_rate: int, pitch_ratio: float
+    ) -> npt.NDArray[np.float32]:
+        calls.append(len(samples))
+        return original(samples, sample_rate, pitch_ratio)
+
+    monkeypatch.setattr(renderer_module, "_pitch_shift", counted_pitch_shift)
+    result = VoicebankRenderer().render_alias(
+        unit,
+        duration_seconds=0.75,
+        pitch_ratio=1.25,
+    )
+
+    assert len(calls) == 1
+    assert calls[0] == round(unit.duration_seconds * SAMPLE_RATE)
+    assert len(result.samples) == round(0.75 * SAMPLE_RATE)
 
 
 def test_result_writes_to_wav_output_sink(tmp_path: Path) -> None:

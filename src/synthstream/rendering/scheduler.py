@@ -9,6 +9,7 @@ import numpy as np
 import numpy.typing as npt
 from scipy.signal import resample_poly  # type: ignore[import-untyped]
 
+from synthstream.rendering.events import AliasEvent
 from synthstream.rendering.overlap import BufferedOverlapComposer
 from synthstream.rendering.renderer import VoicebankRenderer
 from synthstream.voicebank import Voicebank, VoicebankUnit
@@ -147,6 +148,63 @@ class VoicebankRenderScheduler:
         self._scheduled_samples = max(self._scheduled_samples, end_sample)
         return RenderAppend(released, target_samples, overlap_samples, not segment.is_silence)
 
+    def append_alias(
+        self,
+        event: AliasEvent,
+        *,
+        include_leading_gap: bool = True,
+        leading_gap_limit_samples: int | None = None,
+    ) -> RenderAppend:
+        """Render and schedule one complete alias event.
+
+        Unlike :meth:`append`, this path renders all internal source sections
+        in one operation.  OTO overlap is applied once at the boundary from
+        the previous alias, never between the alias's internal sections.
+        """
+        start_sample = max(0, round(event.start_seconds * self.output_sample_rate))
+        end_sample = max(start_sample, round(event.end_seconds * self.output_sample_rate))
+        if end_sample <= start_sample:
+            return RenderAppend(_empty_audio(), 0, 0, False)
+        if leading_gap_limit_samples is not None and leading_gap_limit_samples < 0:
+            raise ValueError("leading_gap_limit_samples must be non-negative")
+
+        unit = self.units.get(event.unit_id)
+        if unit is None:
+            raise ValueError("alias event references an unavailable voicebank unit")
+        released = _empty_audio()
+        gap_samples = max(0, start_sample - self._scheduled_samples)
+        if include_leading_gap and gap_samples:
+            if leading_gap_limit_samples is not None:
+                gap_samples = min(gap_samples, leading_gap_limit_samples)
+                self._scheduled_samples = start_sample - gap_samples
+            released = self._composer.append(
+                np.zeros(gap_samples, dtype=np.float32),
+                overlap_samples=0,
+            )
+            self._scheduled_samples = start_sample
+            self._previous_unit_id = None
+        elif start_sample > self._scheduled_samples:
+            self._scheduled_samples = start_sample
+            self._previous_unit_id = None
+
+        target_samples = end_sample - start_sample
+        overlap_samples = self._alias_overlap_samples(unit, target_samples)
+        rendered = self.renderer.render_alias(
+            unit,
+            duration_seconds=(target_samples + overlap_samples)
+            / self.output_sample_rate,
+            pitch_ratio=event.pitch_ratio,
+        )
+        incoming = fit_audio_length(
+            resample_audio(rendered.samples, rendered.sample_rate, self.output_sample_rate),
+            target_samples + overlap_samples,
+        )
+        appended = self._composer.append(incoming, overlap_samples=overlap_samples)
+        released = np.concatenate((released, appended)) if len(released) else appended
+        self._scheduled_samples = max(self._scheduled_samples, end_sample)
+        self._previous_unit_id = unit.id
+        return RenderAppend(released, target_samples, overlap_samples, True)
+
     def flush(self) -> AudioSamples:
         """Release all staged output and reset the overlap buffer."""
         return self._composer.flush()
@@ -173,6 +231,21 @@ class VoicebankRenderScheduler:
         # the onset of every subsequent alias event, even when it reuses the
         # same recording unit.
         if segment.section_index != 0 or self._previous_unit_id is None:
+            return 0
+        overlap_ms = max(0.0, unit.overlap_ms)
+        if overlap_ms <= 0:
+            return 0
+        return min(
+            target_samples,
+            max(0, round(overlap_ms * self.output_sample_rate / 1000.0)),
+        )
+
+    def _alias_overlap_samples(
+        self,
+        unit: VoicebankUnit,
+        target_samples: int,
+    ) -> int:
+        if self._previous_unit_id is None:
             return 0
         overlap_ms = max(0.0, unit.overlap_ms)
         if overlap_ms <= 0:

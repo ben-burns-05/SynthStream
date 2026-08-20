@@ -88,8 +88,45 @@ def synthesize_timeline(
         units,
         pitch_transfer,
     )
-    for segment, alias_pitch_ratio in zip(segments, alias_pitch_ratios, strict=True):
-        segment_pitch_ratio = segment.pitch_ratio * alias_pitch_ratio
+    index = 0
+    while index < len(segments):
+        segment = segments[index]
+        if segment.silence:
+            result = scheduler.append(
+                RenderSegment(
+                    unit_id=None,
+                    alias=None,
+                    section_index=None,
+                    section_kind="silence",
+                    start_seconds=segment.start_seconds,
+                    end_seconds=segment.end_seconds,
+                )
+            )
+            if result.target_samples:
+                silence_count += 1
+            index += 1
+            continue
+
+        unit = units.get(segment.unit_id)
+        group_end = _alias_group_end(segments, index, unit)
+        if unit is not None and group_end > index + 1:
+            event = AliasEvent(
+                unit_id=unit.id,
+                alias=segment.alias or unit.alias,
+                start_seconds=segment.start_seconds,
+                end_seconds=segments[group_end - 1].end_seconds,
+                pitch_ratio=pitch_ratio
+                * segment.pitch_ratio
+                * alias_pitch_ratios[index],
+            )
+            result = scheduler.append_alias(event)
+            voiced_count += 1
+            overlap_count += int(result.overlap_samples > 0)
+            index = group_end
+            continue
+
+        # Keep a defensive section-level fallback for incomplete decoder
+        # groups. The production direct-IPA path supplies complete aliases.
         result = scheduler.append(
             RenderSegment(
                 unit_id=segment.unit_id,
@@ -98,16 +135,15 @@ def synthesize_timeline(
                 section_kind=segment.section_kind,
                 start_seconds=segment.start_seconds,
                 end_seconds=segment.end_seconds,
-                pitch_ratio=pitch_ratio * segment_pitch_ratio,
+                pitch_ratio=pitch_ratio
+                * segment.pitch_ratio
+                * alias_pitch_ratios[index],
             )
         )
-        if not result.rendered and result.target_samples == 0:
-            continue
-        if segment.silence:
-            silence_count += 1
-        else:
+        if result.rendered:
             voiced_count += 1
             overlap_count += int(result.overlap_samples > 0)
+        index += 1
 
     if scheduler.scheduled_samples < total_samples:
         scheduler.append(
@@ -130,6 +166,32 @@ def synthesize_timeline(
         silence_count,
         overlap_count,
     )
+
+
+def _alias_group_end(
+    segments: tuple[TimelineSegment, ...],
+    start: int,
+    unit: VoicebankUnit | None,
+) -> int:
+    """Return the end of one contiguous complete alias section group."""
+    first = segments[start]
+    if unit is None or first.section_index != 0:
+        return start + 1
+    end = start + 1
+    while end < len(segments):
+        candidate = segments[end]
+        previous = segments[end - 1]
+        if (
+            candidate.silence
+            or candidate.unit_id != first.unit_id
+            or candidate.alias != first.alias
+            or candidate.section_index != end - start
+            or previous.section_index is None
+            or candidate.section_index != previous.section_index + 1
+        ):
+            break
+        end += 1
+    return end if end - start == len(unit.sections) else start + 1
 
 
 def _rebalance_timeline_sections(

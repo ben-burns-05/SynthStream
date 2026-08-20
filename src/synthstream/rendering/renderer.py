@@ -12,6 +12,7 @@ import torchaudio.functional as audio_functional  # type: ignore[import-untyped]
 from scipy.signal import resample  # type: ignore[import-untyped]
 
 from synthstream.audio.output import AudioSamples, AudioSink
+from synthstream.rendering.events import allocate_sustain_only_durations
 from synthstream.voicebank.models import VoicebankSection, VoicebankUnit
 
 
@@ -47,11 +48,65 @@ class VoicebankRenderer:
         duration_seconds: float,
         pitch_ratio: float = 1.0,
     ) -> RenderResult:
-        """Render the complete usable region of one voicebank unit."""
-        return self._render(
+        """Render one complete alias event from the usable unit region."""
+        return self.render_alias(
             unit,
-            unit.sections,
             duration_seconds=duration_seconds,
+            pitch_ratio=pitch_ratio,
+        )
+
+    def render_alias(
+        self,
+        unit: VoicebankUnit,
+        *,
+        duration_seconds: float,
+        pitch_ratio: float = 1.0,
+    ) -> RenderResult:
+        """Render an alias as one pitch operation with sustain-only stretching.
+
+        The source sections are assembled before pitch shifting.  Onset and
+        transition samples retain their recorded lengths whenever the event is
+        long enough; any remaining duration is assigned to sustain.  This
+        avoids resetting the phase vocoder at every internal section boundary.
+        """
+        _validate_transform(duration_seconds, pitch_ratio)
+        source = _read_sections(unit)
+        target_samples = round(duration_seconds * unit.sample_rate)
+        if target_samples < 1:
+            raise ValueError("duration_seconds is shorter than one output sample")
+        section_targets = allocate_sustain_only_durations(
+            unit.sections,
+            target_samples,
+            timebase_hz=unit.sample_rate,
+        )
+        pitched = _pitch_shift(source, unit.sample_rate, pitch_ratio)
+        rendered_sections: list[AudioSamples] = []
+        source_cursor = 0
+        for section, section_target in zip(
+            unit.sections, section_targets, strict=True
+        ):
+            source_end = source_cursor + section.sample_count
+            section_audio = pitched[source_cursor:source_end]
+            if section_target != len(section_audio):
+                # In the normal path only sustain differs from its recorded
+                # duration.  The fallback is needed for very short events
+                # where even protected transients cannot fit.
+                section_audio = _time_stretch(section_audio, section_target)
+            rendered_sections.append(section_audio)
+            source_cursor = source_end
+        transformed = _fit_audio_length(
+            np.concatenate(rendered_sections).astype(np.float32, copy=False),
+            target_samples,
+        )
+        transformed = np.nan_to_num(transformed * self.output_gain, copy=False)
+        transformed = np.clip(transformed, -1.0, 1.0).astype(np.float32, copy=False)
+        return RenderResult(
+            samples=transformed,
+            sample_rate=unit.sample_rate,
+            unit_id=unit.id,
+            source_duration_seconds=len(source) / unit.sample_rate,
+            target_duration_seconds=target_samples / unit.sample_rate,
+            stretch_ratio=target_samples / len(source),
             pitch_ratio=pitch_ratio,
         )
 
@@ -158,6 +213,35 @@ def _time_stretch(samples: AudioSamples, target_samples: int) -> AudioSamples:
         length=target_samples,
     )
     return np.asarray(stretched.numpy(), dtype=np.float32)
+
+
+def _read_sections(unit: VoicebankUnit) -> AudioSamples:
+    """Read and concatenate the exact usable source sections once."""
+    chunks: list[AudioSamples] = []
+    for section in unit.sections:
+        waveform, file_sample_rate = sf.read(
+            unit.wav_path,
+            start=section.start_sample,
+            stop=section.end_sample,
+            dtype="float32",
+            always_2d=True,
+        )
+        if file_sample_rate != unit.sample_rate:
+            raise ValueError("WAV sample rate changed after voicebank loading")
+        chunks.append(np.asarray(np.mean(waveform, axis=1), dtype=np.float32))
+    if not chunks:
+        raise ValueError("voicebank unit has no usable sections")
+    return np.concatenate(chunks).astype(np.float32, copy=False)
+
+
+def _fit_audio_length(samples: AudioSamples, target_samples: int) -> AudioSamples:
+    if len(samples) == target_samples:
+        return np.asarray(samples, dtype=np.float32)
+    if len(samples) > target_samples:
+        return np.asarray(samples[:target_samples], dtype=np.float32)
+    result = np.zeros(target_samples, dtype=np.float32)
+    result[: len(samples)] = samples
+    return result
 
 
 def _largest_power_of_two(value: int) -> int:

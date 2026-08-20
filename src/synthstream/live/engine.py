@@ -637,6 +637,105 @@ class LiveVoicebankEngine:
         return tuple(segments)
 
     def _consume_committed(self, segments: tuple[DecodedSegment, ...]) -> None:
+        """Render complete aliases as single events when available."""
+        index = 0
+        while index < len(segments):
+            group_end = self._complete_alias_group_end(segments, index)
+            if group_end > index + 1:
+                self._consume_alias_group(segments[index:group_end])
+                index = group_end
+            else:
+                self._consume_section_segments((segments[index],))
+                index += 1
+
+    def _complete_alias_group_end(
+        self,
+        segments: tuple[DecodedSegment, ...],
+        start: int,
+    ) -> int:
+        first = segments[start]
+        if first.unit_id is None or first.section_index != 0:
+            return start + 1
+        unit = self._render_scheduler.units.get(first.unit_id)
+        if unit is None:
+            return start + 1
+        end = start + 1
+        while end < len(segments):
+            candidate = segments[end]
+            previous = segments[end - 1]
+            if (
+                candidate.unit_id != first.unit_id
+                or candidate.alias != first.alias
+                or candidate.section_index != end - start
+                or previous.section_index is None
+                or candidate.section_index != previous.section_index + 1
+            ):
+                break
+            end += 1
+        return end if end - start == len(unit.sections) else start + 1
+
+    def _consume_alias_group(self, segments: tuple[DecodedSegment, ...]) -> None:
+        first = segments[0]
+        last = segments[-1]
+        hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
+        start_seconds = first.start_frame * hop_seconds
+        end_seconds = last.end_frame * hop_seconds
+        start_sample = round(start_seconds * self.stream.sample_rate)
+        end_sample = round(end_seconds * self.stream.sample_rate)
+        if self._live_timeline_origin_samples is None:
+            self._live_timeline_origin_samples = start_sample
+        include_leading_gap = self._live_output_started
+        if self._live_output_started:
+            playback_frontier = (
+                self._live_timeline_origin_samples + self.stream.output_clock_samples
+            )
+            if end_sample <= playback_frontier:
+                with self._statistics_lock:
+                    self._committed_segments += len(segments)
+                return
+            if start_sample < playback_frontier:
+                start_seconds = playback_frontier / self.stream.sample_rate
+                include_leading_gap = False
+        event = AliasEvent(
+            unit_id=first.unit_id,
+            alias=first.alias or first.unit_id,
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            confidence=1.0,
+            pitch_ratio=self.pitch_ratio * first.pitch_ratio,
+        )
+        leading_gap_limit: int | None = None
+        if include_leading_gap:
+            target_samples = max(
+                0,
+                end_sample - round(start_seconds * self.stream.sample_rate),
+            )
+            reserve_samples = max(
+                self.stream.block_size,
+                round(0.12 * self.stream.sample_rate),
+                target_samples,
+            )
+            free_samples = (
+                self.stream.output_buffer.capacity_samples
+                - self.stream.output_buffer.available_samples
+            )
+            leading_gap_limit = min(
+                max(0, free_samples - reserve_samples),
+                round(0.25 * self.stream.sample_rate),
+            )
+        result = self._render_scheduler.append_alias(
+            event,
+            include_leading_gap=include_leading_gap,
+            leading_gap_limit_samples=leading_gap_limit,
+        )
+        self._write_released(result.released)
+        if result.rendered:
+            self._live_output_started = True
+        self._emitted_output_samples = self._render_scheduler.scheduled_samples
+        with self._statistics_lock:
+            self._committed_segments += len(segments)
+
+    def _consume_section_segments(self, segments: tuple[DecodedSegment, ...]) -> None:
         for segment in segments:
             hop_seconds = self.extractor.config.hop_samples / self.extractor.config.sample_rate
             start_seconds = segment.start_frame * hop_seconds

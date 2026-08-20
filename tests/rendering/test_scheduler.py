@@ -3,7 +3,12 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-from synthstream.rendering import RenderSegment, VoicebankRenderer, VoicebankRenderScheduler
+from synthstream.rendering import (
+    AliasEvent,
+    RenderSegment,
+    VoicebankRenderer,
+    VoicebankRenderScheduler,
+)
 from synthstream.voicebank import load_voicebank
 
 SAMPLE_RATE = 16_000
@@ -60,6 +65,28 @@ def test_silence_resets_oto_overlap_context(tmp_path: Path) -> None:
     result = scheduler.append(_segment(second.id, second.alias, 0, 0.15, 0.20))
 
     assert result.overlap_samples == 0
+
+
+def test_alias_append_applies_oto_overlap_once_between_events(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    bank = load_voicebank(tmp_path, use_cache=False)
+    scheduler = VoicebankRenderScheduler(
+        bank,
+        VoicebankRenderer(),
+        SAMPLE_RATE,
+        staging_seconds=0.0,
+    )
+    first, second = bank.units
+
+    first_result = scheduler.append_alias(AliasEvent(first.id, first.alias, 0.0, 0.8))
+    second_result = scheduler.append_alias(
+        AliasEvent(second.id, second.alias, 0.8, 1.6)
+    )
+
+    assert first_result.overlap_samples == 0
+    assert second_result.overlap_samples == round(
+        second.overlap_ms * SAMPLE_RATE / 1000.0
+    )
 
 
 def test_live_append_does_not_backfill_elapsed_timeline_gap(tmp_path: Path) -> None:
