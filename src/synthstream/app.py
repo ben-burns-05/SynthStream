@@ -444,6 +444,13 @@ class MainWindow(QMainWindow):
                     "late_alias_groups_dropped": statistics.late_alias_groups_dropped,
                     "late_alias_groups_trimmed": statistics.late_alias_groups_trimmed,
                     "late_alias_trimmed_samples": statistics.late_alias_trimmed_samples,
+                    "direct_noise_rms": statistics.direct_noise_rms,
+                    "direct_speech_start_threshold": statistics.direct_speech_start_threshold,
+                    "direct_speech_end_threshold": statistics.direct_speech_end_threshold,
+                    "direct_gate_calibrated": statistics.direct_gate_calibrated,
+                    "direct_phone_confidence_threshold": (
+                        statistics.direct_phone_confidence_threshold
+                    ),
                     "worker_error": statistics.worker_error,
                 },
                 "stream": {

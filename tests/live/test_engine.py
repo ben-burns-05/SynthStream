@@ -67,6 +67,58 @@ def test_live_engine_moves_fake_microphone_through_decode_and_render(
     assert statistics.worker_error is None
 
 
+def test_live_direct_gate_calibrates_noise_and_uses_hysteresis(tmp_path: Path) -> None:
+    _make_bank(tmp_path)
+    engine = LiveVoicebankEngine(
+        load_voicebank(tmp_path, use_cache=False),
+        FakeDuplexAudioBackend(),
+        use_direct_ipa=False,
+        direct_noise_calibration_seconds=0.2,
+    )
+
+    for _ in range(2):
+        engine._update_direct_noise_floor(0.00002, round(0.1 * SAMPLE_RATE))
+
+    statistics = engine.statistics
+    assert statistics.direct_gate_calibrated
+    assert statistics.direct_noise_rms == pytest.approx(0.00002)
+    assert statistics.direct_speech_end_threshold == pytest.approx(0.00005)
+    assert statistics.direct_speech_start_threshold == pytest.approx(0.0001)
+    assert not engine._direct_gate_is_active(0.00005)
+    assert engine._direct_gate_is_active(0.0002)
+
+
+def test_live_direct_flush_does_not_recognize_without_speech(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bank_path = PROJECT_ROOT / "voicebank" / "TETO-English-150401"
+    if not bank_path.is_dir():
+        pytest.skip("local TETO English development voicebank is not installed")
+
+    backend = FakeDuplexAudioBackend()
+    engine = LiveVoicebankEngine.from_voicebank(bank_path, backend)
+    assert engine.direct_recognizer is not None
+    calls = 0
+
+    def fake_recognize(
+        samples: np.ndarray, sample_rate: int
+    ) -> tuple[DetectedPhone, ...]:
+        nonlocal calls
+        del samples, sample_rate
+        calls += 1
+        return ()
+
+    monkeypatch.setattr(engine.direct_recognizer, "recognize", fake_recognize)
+    engine.start(background=False)
+    backend.feed(np.zeros(round(0.8 * SAMPLE_RATE), dtype=np.float32))
+    engine.process_available()
+    engine.flush()
+    engine.stop()
+
+    assert calls == 0
+    assert engine.statistics.detected_phones == 0
+
+
 def test_live_engine_diagnostics_separate_render_and_late_alias_events(
     tmp_path: Path,
 ) -> None:

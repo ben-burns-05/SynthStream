@@ -84,6 +84,11 @@ class LiveEngineStatistics:
     late_alias_groups_dropped: int = 0
     late_alias_groups_trimmed: int = 0
     late_alias_trimmed_samples: int = 0
+    direct_noise_rms: float = 0.0
+    direct_speech_start_threshold: float = 0.0
+    direct_speech_end_threshold: float = 0.0
+    direct_gate_calibrated: bool = False
+    direct_phone_confidence_threshold: float = 0.0
     diagnostic_events: tuple[LiveDiagnosticEvent, ...] = ()
 
 
@@ -118,6 +123,9 @@ class LiveVoicebankEngine:
         direct_commit_lag_seconds: float = 0.4,
         direct_endpoint_seconds: float = 0.24,
         direct_silence_rms_threshold: float = 0.00005,
+        direct_noise_calibration_seconds: float = 0.5,
+        direct_speech_start_seconds: float = 0.1,
+        direct_phone_confidence_threshold: float = 0.15,
         direct_utterance_seconds: float = 6.0,
         direct_context_padding_seconds: float = 0.2,
         diagnostic_input_seconds: float = 10.0,
@@ -131,12 +139,19 @@ class LiveVoicebankEngine:
             raise ValueError("pitch_ratio must be finite and positive")
         if not math.isfinite(output_gain) or output_gain < 0:
             raise ValueError("output_gain must be finite and non-negative")
+        if (
+            not math.isfinite(direct_phone_confidence_threshold)
+            or not 0 <= direct_phone_confidence_threshold <= 1
+        ):
+            raise ValueError("direct_phone_confidence_threshold must be between zero and one")
         for value, name in (
             (direct_window_seconds, "direct_window_seconds"),
             (direct_update_seconds, "direct_update_seconds"),
             (direct_commit_lag_seconds, "direct_commit_lag_seconds"),
             (direct_endpoint_seconds, "direct_endpoint_seconds"),
             (direct_silence_rms_threshold, "direct_silence_rms_threshold"),
+            (direct_noise_calibration_seconds, "direct_noise_calibration_seconds"),
+            (direct_speech_start_seconds, "direct_speech_start_seconds"),
             (direct_utterance_seconds, "direct_utterance_seconds"),
             (direct_context_padding_seconds, "direct_context_padding_seconds"),
             (diagnostic_input_seconds, "diagnostic_input_seconds"),
@@ -182,6 +197,15 @@ class LiveVoicebankEngine:
         self.direct_commit_lag_seconds = direct_commit_lag_seconds
         self.direct_endpoint_samples = max(1, round(direct_endpoint_seconds * sample_rate))
         self.direct_silence_rms_threshold = direct_silence_rms_threshold
+        self.direct_noise_calibration_samples = max(
+            1,
+            round(direct_noise_calibration_seconds * sample_rate),
+        )
+        self.direct_speech_start_samples = max(
+            1,
+            round(direct_speech_start_seconds * sample_rate),
+        )
+        self.direct_phone_confidence_threshold = direct_phone_confidence_threshold
         self.direct_utterance_samples = max(1, round(direct_utterance_seconds * sample_rate))
         self.direct_context_padding_samples = max(
             1, round(direct_context_padding_seconds * sample_rate)
@@ -215,6 +239,12 @@ class LiveVoicebankEngine:
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
+        self._direct_speech_candidate_audio = np.empty(0, dtype=np.float32)
+        self._direct_speech_candidate_samples = 0
+        self._direct_noise_rms = self.direct_silence_rms_threshold
+        self._direct_noise_calibration_values: list[float] = []
+        self._direct_noise_calibration_seen_samples = 0
+        self._direct_gate_calibrated = False
         self._live_output_started = False
         self._live_timeline_origin_samples: int | None = None
         self._emitted_output_samples = 0
@@ -287,6 +317,11 @@ class LiveVoicebankEngine:
                 self._late_alias_groups_dropped,
                 self._late_alias_groups_trimmed,
                 self._late_alias_trimmed_samples,
+                self._direct_noise_rms,
+                self._direct_gate_thresholds()[0],
+                self._direct_gate_thresholds()[1],
+                self._direct_gate_calibrated,
+                self.direct_phone_confidence_threshold,
                 tuple(self._diagnostic_events),
             )
 
@@ -308,6 +343,12 @@ class LiveVoicebankEngine:
         self._diagnostic_input_audio = np.empty(0, dtype=np.float32)
         self._direct_quiet_samples = 0
         self._direct_speech_seen = False
+        self._direct_speech_candidate_audio = np.empty(0, dtype=np.float32)
+        self._direct_speech_candidate_samples = 0
+        self._direct_noise_rms = self.direct_silence_rms_threshold
+        self._direct_noise_calibration_values = []
+        self._direct_noise_calibration_seen_samples = 0
+        self._direct_gate_calibrated = False
         self._live_output_started = False
         self._live_timeline_origin_samples = None
         self._emitted_output_samples = 0
@@ -420,16 +461,34 @@ class LiveVoicebankEngine:
             if len(self._direct_audio) > self.direct_window_samples:
                 self._direct_audio = self._direct_audio[-self.direct_window_samples :]
             self._direct_samples_since_update += len(samples)
+            self._update_direct_noise_floor(self._input_rms, len(samples))
+            speech_active = self._direct_gate_is_active(self._input_rms)
             endpoint_reached = False
-            if self._input_rms >= self.direct_silence_rms_threshold:
+            if speech_active:
                 if not self._direct_speech_seen:
-                    self._direct_utterance_audio = np.empty(0, dtype=np.float32)
-                    self._direct_utterance_start_samples = (
-                        self._direct_total_samples - len(samples)
+                    self._direct_speech_candidate_audio = np.concatenate(
+                        (self._direct_speech_candidate_audio, samples)
                     )
-                self._append_direct_utterance(samples)
-                self._direct_speech_seen = True
-                self._direct_quiet_samples = 0
+                    self._direct_speech_candidate_samples += len(samples)
+                    if (
+                        self._direct_speech_candidate_samples
+                        >= self.direct_speech_start_samples
+                    ):
+                        self._direct_utterance_audio = (
+                            self._direct_speech_candidate_audio.copy()
+                        )
+                        self._direct_utterance_start_samples = (
+                            self._direct_total_samples - len(self._direct_utterance_audio)
+                        )
+                        self._direct_speech_candidate_audio = np.empty(
+                            0, dtype=np.float32
+                        )
+                        self._direct_speech_candidate_samples = 0
+                        self._direct_speech_seen = True
+                        self._direct_quiet_samples = 0
+                else:
+                    self._append_direct_utterance(samples)
+                    self._direct_quiet_samples = 0
             elif self._direct_speech_seen:
                 self._append_direct_utterance(samples)
                 self._direct_quiet_samples += len(samples)
@@ -438,11 +497,16 @@ class LiveVoicebankEngine:
                     self._direct_utterance_audio = np.empty(0, dtype=np.float32)
                     self._direct_quiet_samples = 0
                     self._direct_speech_seen = False
+                    self._direct_speech_candidate_audio = np.empty(0, dtype=np.float32)
+                    self._direct_speech_candidate_samples = 0
                     endpoint_reached = True
+            else:
+                self._direct_speech_candidate_audio = np.empty(0, dtype=np.float32)
+                self._direct_speech_candidate_samples = 0
             if (
                 self._live_output_started
                 and self._live_timeline_origin_samples is not None
-                and self._input_rms < self.direct_silence_rms_threshold
+                and not speech_active
             ):
                 self.stream.allow_silence_until(
                     max(
@@ -476,6 +540,46 @@ class LiveVoicebankEngine:
             self._direct_utterance_audio = self._direct_utterance_audio[excess:]
             self._direct_utterance_start_samples += excess
 
+    def _direct_gate_thresholds(self) -> tuple[float, float]:
+        """Return hysteresis thresholds derived from the current noise floor."""
+        noise = max(self._direct_noise_rms, 1e-8)
+        return (
+            max(self.direct_silence_rms_threshold * 2.0, noise * 4.0),
+            max(self.direct_silence_rms_threshold, noise * 2.0),
+        )
+
+    def _update_direct_noise_floor(self, rms: float, sample_count: int) -> None:
+        """Calibrate and slowly track the microphone's quiet RMS level."""
+        if not self._direct_gate_calibrated:
+            self._direct_noise_calibration_values.append(max(rms, 1e-8))
+            self._direct_noise_calibration_seen_samples += sample_count
+            if (
+                self._direct_noise_calibration_seen_samples
+                >= self.direct_noise_calibration_samples
+            ):
+                values = np.asarray(self._direct_noise_calibration_values, dtype=np.float64)
+                self._direct_noise_rms = max(
+                    1e-8,
+                    float(np.quantile(values, 0.2)),
+                )
+                self._direct_gate_calibrated = True
+            return
+        if not self._direct_speech_seen:
+            _, end_threshold = self._direct_gate_thresholds()
+            if rms <= end_threshold:
+                self._direct_noise_rms = self._direct_noise_rms * 0.98 + rms * 0.02
+
+    def _direct_gate_is_active(self, rms: float) -> bool:
+        """Return whether one analysis chunk should be treated as speech."""
+        start_threshold, end_threshold = self._direct_gate_thresholds()
+        if self._direct_speech_seen:
+            return rms >= end_threshold
+        if not self._direct_gate_calibrated:
+            # Permit an obviously loud utterance to begin during calibration,
+            # while avoiding false starts from the headset noise floor.
+            return rms >= max(0.001, self.direct_silence_rms_threshold * 20.0)
+        return rms >= start_threshold
+
     def _append_diagnostic_input(self, samples: AudioSamples) -> None:
         with self._statistics_lock:
             self._diagnostic_input_audio = np.concatenate(
@@ -487,7 +591,7 @@ class LiveVoicebankEngine:
             raise RuntimeError("direct IPA frontend is unavailable")
         if not final and self._direct_samples_since_update < self.direct_update_samples:
             return
-        if not final and not self._direct_speech_seen:
+        if not self._direct_speech_seen:
             return
         if len(self._direct_audio) < 1:
             return
@@ -532,6 +636,11 @@ class LiveVoicebankEngine:
                 )
                 for phone in phones
             )
+        phones = tuple(
+            phone
+            for phone in phones
+            if phone.confidence >= self.direct_phone_confidence_threshold
+        )
         self._detected_phones += len(phones)
         offset_seconds = (
             self._direct_utterance_start_samples
